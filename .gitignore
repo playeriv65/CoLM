@@ -160,7 +160,7 @@ cython_debug/
 #.idea/
 
 # Project data
-./data
+data/
 out
 wandb
 math_eval/outputs/
@@ -168,3 +168,9 @@ vllm
 submodlib
 output/*
 test.ipynb
+# Downloaded models
+hf_models/
+math_eval/hf_models/
+
+# Logs
+logs/

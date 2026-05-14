@@ -46,7 +46,7 @@ class ModelArguments:
             "help": "Where do you want to store the pretrained models downloaded from huggingface.co"},
     )
     use_fast_tokenizer: bool = field(
-        default=False,
+        default=True,
         metadata={
             "help": "Whether to use one of the fast tokenizer (backed by the tokenizers library) or not."},
     )
@@ -76,11 +76,11 @@ class ModelArguments:
     )
 
     ### added ####
-    lora: Optional[bool] = field(default=False, metadata={
+    lora: Optional[bool] = field(default=True, metadata={
                                  "help": "whether to use lora"})
-    lora_r: Optional[int] = field(default=8, metadata={"help": ("r for lora")})
-    lora_alpha: Optional[float]=field(default=32, metadata={"help": ("alpha for lora")})
-    lora_dropout: Optional[float]=field(default=0.1, metadata={"help": ("dropout for lora")})
+    lora_r: Optional[int] = field(default=128, metadata={"help": ("r for lora")})
+    lora_alpha: Optional[float]=field(default=512, metadata={"help": ("alpha for lora")})
+    lora_dropout: Optional[float]=field(default=0.05, metadata={"help": ("dropout for lora")})
     lora_target_modules: List[str]=field(
         default_factory=list, metadata={"help": ("target modules for lora")})
     enable_dropout: bool = field(

@@ -12,6 +12,22 @@ trainer_log_levels = dict(**log_levels, passive=-1)
 
 @dataclass
 class TrainingArguments(TA):
+    output_dir: str = field(
+        default="./out/default",
+        metadata={
+            "help": (
+                "The output directory. Auto-generated if not specified."
+            )
+        },
+    )
+    do_train: bool = field(
+        default=True,
+        metadata={
+            "help": (
+                "Whether to run training."
+            )
+        },
+    )
     analysis_mode: float = field(
         default=False,
         metadata={
@@ -37,7 +53,7 @@ class TrainingArguments(TA):
         },
     )
     small_batch_ratio: Optional[float] = field(
-        default=1.,
+        default=0.5,
         metadata={
             "help": (
                 "The ratio of the large batch to be trained. "
@@ -45,7 +61,7 @@ class TrainingArguments(TA):
         },
     )
     data_selection_method: Optional[str] = field(
-        default="none",
+        default="submodlib",
         metadata={
             "help": (
                 "Method to select examples in the large batch. "
@@ -79,7 +95,7 @@ class TrainingArguments(TA):
         },
     )
     mezo_selection: Optional[str] = field(
-        default="mezo_selection",
+        default="grad",
         metadata={
             "help": (
                 "Mezo selection criteria. "
@@ -123,7 +139,7 @@ class TrainingArguments(TA):
         },
     )
     mezo_optim: Optional[str] = field(
-        default="sgd",
+        default="adam",
         metadata={
             "help": (
                 "Optimizer to estimate with mezo. "
@@ -214,7 +230,7 @@ class TrainingArguments(TA):
         },
     )
     wandb_entity: Optional[str] = field(
-        default="hsgser",
+        default=None,
         metadata={
             "help": (
                 "Name of wandb entity. "
@@ -288,7 +304,7 @@ class TrainingArguments(TA):
         },
     )
     modify_forward: bool = field(
-        default=False, 
+        default=False,
         metadata={
             "help": (
                 "Whether to only train the option part of the input."

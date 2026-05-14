@@ -1,0 +1,7 @@
+{
+    "model_name_or_path": "microsoft/phi-2",
+    "train_files": ["data/MathInstruct.jsonl"],
+    "max_steps": 1024,
+    "wandb_project": "colm_math_lora",
+    "wandb_entity": "playeriv65-university-of-minnesota"
+}

@@ -1,0 +1,10 @@
+{
+    "model_name_or_path": "microsoft/phi-2",
+    "train_files": ["data/MathInstruct.jsonl"],
+    "max_steps": 5,
+    "per_device_train_batch_size": 4,
+    "gradient_accumulation_steps": 8,
+    "efficient_mezo": true,
+    "wandb_project": "colm_math_lora_efficient",
+    "wandb_entity": "playeriv65-university-of-minnesota"
+}

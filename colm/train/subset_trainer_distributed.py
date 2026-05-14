@@ -221,11 +221,20 @@ class SubsetTrainer(Trainer):
             print(f"Save indices to {self.indices_path}")
         self.prev_m_t = None
         self.prev_v_t = None
-        self.named_parameters_to_optim = []
         self.original_grad_settings = {}
         self.zo_random_seed = np.random.randint(1000000000)
         self.random_selection_seed = np.random.randint(42)
         self.data_collator = data_collator
+        
+        # Initialize named_parameters_to_optim and param_dim
+        self.named_parameters_to_optim = []
+        if self.args.data_selection_unit in ["mezo", "masked_grad"]:
+            for name, param in self.model.named_parameters():
+                if any(substring in name for substring in self.last_layers):
+                    self.named_parameters_to_optim.append((name, param))
+            assert len(self.named_parameters_to_optim) != 0, f"No layer found for last_layers={self.last_layers}"
+            self.param_dim = sum(param.numel() for _, param in self.named_parameters_to_optim)
+            logger.info(f"Initialized named_parameters_to_optim: {len(self.named_parameters_to_optim)} layers, param_dim={self.param_dim}")
 
     def _get_collator_with_removed_columns(
         self, data_collator: Callable, description: Optional[str] = None
@@ -1166,14 +1175,6 @@ class SubsetTrainer(Trainer):
             res = hidden_states[-1][ids, pos]
         # select based on mezo gradient
         elif self.args.data_selection_unit == "mezo":
-            if len(self.named_parameters_to_optim) == 0:
-                for name, param in model.named_parameters():
-                    if any(substring in name for substring in self.last_layers):
-                        self.named_parameters_to_optim.append((name, param))
-
-                assert len(
-                    self.named_parameters_to_optim) != 0, "no layer found"
-
             self.zo_perturb_parameters(scaling_factor=1)
             loss1 = self.zo_forward(model, inputs)
             self.zo_perturb_parameters(scaling_factor=-2)
@@ -1196,7 +1197,6 @@ class SubsetTrainer(Trainer):
 
         elif self.args.data_selection_unit == 'masked_grad':
             self.original_grad_settings = {}
-            self.named_parameters_to_optim = []
 
             for name, param in model.named_parameters():
                 self.original_grad_settings[name] = param.requires_grad
@@ -1757,8 +1757,7 @@ class SubsetTrainerEfficient(SubsetTrainer):
                     _ = list(sampler)
 
         total_batched_samples = 0
-        # TODO: Improve this part, Hardcode for nowAdd commentMore actions
-        total_reps = torch.zeros((self.num_orig, 2560 * 128), device=args.device)
+        total_reps = torch.zeros((self.num_orig, self.param_dim), device=args.device)
         input_list = [None for _ in range(self.num_orig)]
         model.module.decomposer._compute_per_sample_loss = True
 
@@ -2001,8 +2000,7 @@ class SubsetTrainerEfficient(SubsetTrainer):
                     selected_inputs = [selected_inputs[i:i+self.new_bs]
                                        for i in range(0, len(selected_inputs), self.new_bs)]
                     # Reinit
-                    # TODO: Improve this part, Hardcode for now
-                    total_reps = torch.zeros((self.num_orig, 2560 * 128), device=args.device)
+                    total_reps = torch.zeros((self.num_orig, self.param_dim), device=args.device)
                     input_list = [None for _ in range(self.num_orig)]
                     
                     for _, inner_inputs in enumerate(selected_inputs):
@@ -2176,13 +2174,6 @@ class SubsetTrainerEfficient(SubsetTrainer):
     def save_select(self, model, inputs):
         # This efficient implementation currently only supports MeZO
         assert self.args.data_selection_unit == "mezo"
-        if len(self.named_parameters_to_optim) == 0:
-            for name, param in model.named_parameters():
-                if any(substring in name for substring in self.last_layers):
-                    self.named_parameters_to_optim.append((name, param))
-
-            assert len(
-                self.named_parameters_to_optim) != 0, "no layer found"
         assert len(self.named_parameters_to_optim) == 1
         
         # Forward pass until penultimate layer for the entire batch

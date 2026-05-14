@@ -61,8 +61,33 @@ def main():
             json_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-        # Set run_name for wandb
-        training_args.run_name = training_args.output_dir.split('/')[-1]
+
+    # Auto-infer lora_target_modules if not specified
+    if not model_args.lora_target_modules:
+        if "phi-2" in model_args.model_name_or_path:
+            model_args.lora_target_modules = ["q_proj", "k_proj", "v_proj", "fc1", "fc2"]
+        else:  # Llama, zephyr
+            model_args.lora_target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
+        logger.info(f"Auto-inferred lora_target_modules: {model_args.lora_target_modules}")
+
+    # Auto-infer fp16/bf16 if not explicitly set
+    if not training_args.fp16 and not training_args.bf16:
+        if "phi-2" in model_args.model_name_or_path or "Llama" in model_args.model_name_or_path:
+            training_args.fp16 = True
+            model_args.torch_dtype = "none"
+        else:  # zephyr
+            training_args.bf16 = True
+            model_args.torch_dtype = "bfloat16"
+        logger.info(f"Auto-inferred fp16={training_args.fp16}, bf16={training_args.bf16}")
+
+    # Auto-generate output_dir if not specified
+    if training_args.output_dir is None:
+        model_name = model_args.model_name_or_path.split("/")[-1]
+        training_args.output_dir = f"./out/{model_name}-{training_args.max_steps}steps-seed{training_args.seed}"
+        logger.info(f"Auto-generated output_dir: {training_args.output_dir}")
+
+    # Set run_name for wandb
+    training_args.run_name = training_args.output_dir.split('/')[-1]
 
     # Setup logging
     logging.basicConfig(
