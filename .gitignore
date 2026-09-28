@@ -174,3 +174,5 @@ math_eval/hf_models/
 
 # Logs
 logs/
+envs/*.log
+data

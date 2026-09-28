@@ -1,0 +1,28 @@
+# Original CoLM environment (requirement.txt) reproduced on Blackwell (sm_120).
+# Only deviation from requirement.txt: torch stack bumped 2.2.1 -> 2.8.0 (cu128),
+# because torch 2.2.1 has no sm_120 kernels. Unpinned packages are resolved as of
+# the earliest date satisfying every pin (2024-08-31) via --exclude-newer (see setup script).
+# Dropped (never imported by the code): auto-gptq, jupyterlab.
+torch==2.8.0
+torchvision==0.23.0
+torchaudio==2.8.0
+packaging
+peft==0.7.1
+transformers==4.43.2
+accelerate==0.33.0
+evaluate
+openai
+datasets
+wandb
+torchmetrics
+numpy==1.26.4
+pandas==1.5.3
+matplotlib==3.8.4
+seaborn==0.13.2
+plotly==5.24.0
+scikit-learn==1.4.2
+tensorboard
+nltk
+rouge-score
+bert_score
+traker
