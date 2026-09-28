@@ -27,6 +27,12 @@ Per rank: 32 examples forwarded for selection, 16 trained (8 micro-batches of 2)
   `compute_loss_context_manager` (fp16 autocast). The port's `zo_forward_final_layer` lost the
   autocast (fp32 now): a fidelity deviation to fix. The fp32 selection forward is a likely reason
   selection is ~60% of the step.
+  **Correction (measured 2026-09-28):** in transformers 4.43 `compute_loss_context_manager` only
+  enters autocast for `use_cpu_amp` (`autocast_smart_context_manager` returns `nullcontext` on
+  GPU; GPU AMP comes from accelerate wrapping `model.forward`). The decomposer never goes through
+  `model.forward`, so upstream's ±eps calls were fp32 as well; the port matches upstream and O2 is a
+  precision change (D2), not a fidelity fix. The fp32 prefix forward is confirmed as the dominant
+  cost (see "Measured baseline").
 - **F4 — `keep_sources` = the 10 smallest MathInstruct sources = 36.9% of examples.** Their
   features are discarded before the Adam transform; the 4 selected sources (aqua_rat 34.1%,
   math50k_camel 18.9%, gsm_rft 10.8%, mathqa 9.3%) are the only ones whose features matter.
@@ -52,7 +58,7 @@ Per rank: 32 examples forwarded for selection, 16 trained (8 micro-batches of 2)
 | id | change | exactness | notes |
 |---|---|---|---|
 | O1 | Skip the ZO forward for `keep_sources` examples and for sources with a zero quota | math-exact | ~37% of the selection forward. Needs source ids all-gathered before the forward (multi-GPU). Sources selected in full still need g_i (Adam state update). Keep F2 divisor. |
-| O2 | Restore fp16 autocast around the ±eps final-layer ZO calls | restores upstream | fidelity fix (F3) |
+| O2 | fp16 autocast around the ±eps final-layer ZO calls | precision change | upstream was fp32 too (F3 correction); decide with D2. Measured: 290 ms/step fp32 |
 | O3 | Gather the 32 scalars g_i per rank instead of `[32, 327680]` fp32 features; rank 0 regenerates z from the seed | bitwise | removes 42 MB/rank D2H + pickle + gather + H2D; multi-GPU only. Move gathered example tensors to CPU (or gather indices) to avoid cross-device CUDA contexts. |
 | O4 | Drop KV cache + deepcopy in the selection forward | math-exact | done in the port |
 | O5 | lm_head + CE only at label positions in the ZO final layer (keep F2 divisor) | math-exact | lm_head is the largest part of each ±eps call |
@@ -69,3 +75,60 @@ Per rank: 32 examples forwarded for selection, 16 trained (8 micro-batches of 2)
   flash varlen and O9).
 - D3: accept `enable_dropout=False` (no LoRA / residual dropout) to make O9 exact.
 - D4: whether O10 is acceptable.
+
+## Measured baseline (2026-09-28, commit of `profile_timing`)
+
+`configs/timing_phi2_efficient.json` (the default config above, 130 steps, `profile_timing=fine`,
+census on steps 1–10), 1× RTX PRO 6000 Blackwell, torch 2.13 cu130,
+transformers 5.17. Means over steps 11–130 (120 steps); 50-step sliding mean within ±1.5% of the
+window mean; loadavg 12.1 at start, 19.4 at end. Top-level residual vs the step clock: 2.6 ms
+(0.09%). Fine timers synchronise at every section boundary (per layer). Instrumentation overhead,
+from `configs/timing_phi2_efficient_coarse.json` (coarse timers only, 60 steps, same seed and so
+the same batches) over steps 11–60: step 2866 vs 2836 ms (+1.1%), selection 1867 vs 1841 ms
+(+1.4%), prefix forward +1.6%, training +0.4%; below 5%, so the fine run's numbers stand.
+
+| phase (ms / optimizer step) | mean | % step | p50 | p90 |
+|---|---:|---:|---:|---:|
+| **step** (wall clock between optimizer steps) | 2868 | 100 | 2868 | 3154 |
+| selection | 1869 | 65.2 | 1870 | 2104 |
+| · ZO features (8 micro-batches of 4) | 1828 | 63.7 | 1829 | 2065 |
+| · · forward_till_penultimate (31 layers, fp32, no autocast) | 1525 | 53.2 | 1525 | 1731 |
+| · · · per layer: 47.9 ms (min 47.8, max 48.1) × 31 | 1489 | 51.9 | | |
+| · · · `model.eval()` walk | 28 | 1.0 | | |
+| · · final layer +eps / −eps (fp32) | 148 + 142 | 10.1 | | |
+| · · · lm_head GEMM (each) | 57 | 2.0 | | |
+| · · · last decoder layer (each; mlp 30, attn 18) | 49 | 1.7 | | |
+| · · · `model.eval()` walk (each) | 33 / 27 | 1.1 | | |
+| · · perturb / restore / z (4 × `manual_seed` + normal) | 13 | 0.4 | | |
+| · features D2H [32, 327680] fp32 (42 MB) | 20 | 0.7 | | |
+| · rank-0 selection (incl. 42 MB H2D 10 ms; FL 2 ms) | 16 | 0.5 | | |
+| · other selection host work (split, recollate, stats) | 5 | 0.2 | | |
+| train (8 micro-batches of 2) | 917 | 32.0 | 919 | 965 |
+| · forward (fp16 autocast) | 394 | 13.7 | | |
+| · backward | 478 | 16.7 | | |
+| · `model.train()` walk | 28 | 1.0 | | |
+| HF `floating_point_ops` (walks all parameters per micro-batch) | 36 | 1.3 | | |
+| data (8 micro-batches + H2D) | 25 | 0.9 | | |
+| optimizer (clip 5, step 10, sched+zero_grad 3) | 18 | 0.6 | | |
+
+Tokens per step (means): selection forward 11,585 padded vs 7,368 real (36.4% padding), 4,257
+label tokens; training 6,499 padded vs 3,549 real (45.4% padding; examples keep the padding of
+their original micro-batch when re-collated), 1,969 label tokens. Step time correlates with the
+selection padded-token count at r = 0.99; the prefix forward costs 123 µs per padded token
+(≈ 4 µs per token-layer, ≈ 40 TFLOP/s fp32 effective), the lm_head 4.5 µs per padded token per
+call. Training forward/backward have a large per-step intercept (≈ 320 ms each for 8
+micro-batches, estimate from a linear fit): small micro-batches, 5.3k/7.1k aten ops per
+micro-batch forward/backward and a per-forward fp32→fp16 cast of the frozen base weights.
+
+Census (steps 2–10): per step 150 synchronising CUDA calls, 65 of them in selection (24 per-tensor
+`.cpu()` of the micro-batches, 16 in `create_causal_mask`'s `.all()` checks, the 42 MB feature
+D2H and H2D, ~20 small index copies on rank 0); training forward has another 16 mask checks and
+the HF loop 16 `isnan/isinf` checks. Selection moves 42.1 MB D2H and 42.2 MB H2D per step
+(single GPU; both are the feature matrix round trip).
+
+Reading: selection is compute in the fp32 prefix forward (53% of the step), not facility
+location (0.1%) or communication. Levers by size: precision of the prefix forward (D2), the
+padded and the kept-source rows it processes (O1, O6), then lm_head at label positions only (O5)
+and the fp32 final layer (F3/O2); training is overhead-bound at micro-batch 2 (O8). Host
+walks (`model.eval()` ×3 and `model.train()` per micro-batch, HF flop counting) cost ≈ 150 ms
+(5%) per step and are bitwise-free to remove.

@@ -25,6 +25,9 @@ tokens, W&B keys or machine-private data.
   and `training_step` (loss scaling). Do not copy HF loop internals back in.
 - `colm/train/custom_phi.py` — Phi forward split before the last decoder layer (5.x modeling API).
 - `colm/train/facility_location.py` — source-wise facility location (submodlib).
+- `colm/train/step_timing.py` — opt-in per-phase step timer (`--profile_timing coarse|fine`),
+  transfer/sync census, and the summariser (`python -m colm.train.step_timing <jsonl>`). At level
+  `off` every timer call is a no-op; keep new timing sections behind `timer.section` / `timer.fine`.
 - `colm/train/*_arguments.py` — all hyperparameters; defaults are the paper recipe.
 - `math_eval/` (vLLM / HF generation), `superglue_eval/` — evaluation scripts.
 

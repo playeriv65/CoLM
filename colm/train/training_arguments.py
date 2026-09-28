@@ -155,6 +155,28 @@ class TrainingArguments(HFTrainingArguments):
         },
     )
 
+    # --- Step timing (colm/train/step_timing.py) ---
+    profile_timing: str = field(
+        default="off",
+        metadata={
+            "help": "Per-phase wall-clock breakdown of every optimizer step. 'off' adds no "
+            "synchronize; 'coarse' times the phases with a CUDA synchronize at each boundary; "
+            "'fine' also times per-layer / per-op sub-phases (more syncs, slight inflation).",
+            "choices": ["off", "coarse", "fine"],
+        },
+    )
+    profile_timing_dir: str | None = field(
+        default=None,
+        metadata={"help": "Directory of the step-timing JSONL (default: output_dir)."},
+    )
+    profile_census_steps: int = field(
+        default=0,
+        metadata={
+            "help": "Count host<->device copies and synchronizing calls during the first N "
+            "steps (slow; keep N <= the summary warmup so these steps are not timed)."
+        },
+    )
+
     # --- SuperGLUE ---
     max_new_tokens: int = field(
         default=50, metadata={"help": "Maximum number of generated tokens."}

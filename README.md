@@ -57,6 +57,22 @@ Logs go to `logs/<config>-gpu<ids>-np<n>-<timestamp>.log`; every loss log also r
 All hyperparameters live in the dataclasses of `colm/train/*_arguments.py`
 (paper defaults) and the JSON files in `configs/`.
 
+### Step timing
+`--profile_timing coarse|fine` (default `off`: no synchronize, no overhead) writes a per-phase
+wall-clock breakdown of every optimizer step to
+`<profile_timing_dir or output_dir>/step_timing-<run>-<level>-rank<r>-<timestamp>.jsonl`.
+Each section boundary calls `torch.cuda.synchronize()`, so GPU work is charged to the phase that
+launched it; `fine` adds per-layer / per-op sections (more syncs, slightly inflated totals).
+`--profile_census_steps N` counts aten ops, host<->device copies (bytes) and synchronizing calls per
+phase during the first N steps (slow; keep N within the summary warmup). Summarise with
+```bash
+python -m colm.train.step_timing logs/step_timing-....jsonl --warmup 10   # table + .summary.json
+```
+Every parent node is reported with an explicit `other` residual; the root is the measured time
+between consecutive optimizer steps. Configs: `configs/timing_phi2_efficient.json` (fine, 130 steps,
+census on the 10 warmup steps) and `configs/timing_phi2_efficient_coarse.json` (coarse, 60 steps).
+Measured breakdown of the default config: `docs/optimization-backlog.md` ("Measured baseline").
+
 Note: We implement CoLM with an efficient last-layer zeroth-order gradient estimation that requires approximately only one forward pass of the model. While the selection time is negligible (<0.1s), CoLM still introduces additional overhead, such as synchronizing gradients before selection, broadcasting selected indices back, padding after selection (which can make some samples longer), transferring tensors between CPU and GPU, context switching, and so on. In the paper, we report the ideal training time of our method which is the forward pass time for a batch size of 128 + the forward and backward pass time for a batch size of 64.
 
 Note: the logged training `loss` of the CoLM trainers is the mean loss divided by `small_batch_ratio`

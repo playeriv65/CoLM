@@ -28,6 +28,7 @@ from transformers import Trainer
 
 from colm.train.custom_phi import DecomposedPhiCausalLM
 from colm.train.facility_location import get_orders_and_weights
+from colm.train.step_timing import StepTimer, StepTimingCallback
 from colm.train.utils import collate_fn
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,18 @@ def _to_cpu(inputs: dict) -> dict:
     return {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
 
 
+def _nbytes(inputs: dict) -> int:
+    return sum(v.nbytes for v in inputs.values() if isinstance(v, torch.Tensor))
+
+
+def _token_counts(timer: StepTimer, prefix: str, batch: dict) -> None:
+    """Samples, padded / real (attention mask) / label tokens of one (CPU) micro-batch."""
+    timer.count(f"{prefix}_samples", batch["input_ids"].shape[0])
+    timer.count(f"{prefix}_tokens_padded", batch["input_ids"].numel())
+    timer.count(f"{prefix}_tokens_real", int(batch["attention_mask"].sum()))
+    timer.count(f"{prefix}_label_tokens", int((batch["labels"] != -100).sum()))
+
+
 def _split_examples(inputs: dict) -> list[dict]:
     """Slice a collated batch into single-example batches (tensors keep dim 0)."""
     batch_size = len(inputs["input_ids"])
@@ -103,6 +116,33 @@ class _CoLMTrainerBase(Trainer):
         self._micro_step = 0
         self._select_seconds = 0.0
         self._last_log = None  # (time, global_step) of the previous loss log
+        # Opt-in per-phase step timing; a no-op (no synchronize) at level 'off'.
+        self._timer = StepTimer(self.args.profile_timing)
+        if self._timer.enabled:
+            out_dir = self.args.profile_timing_dir or self.args.output_dir
+            out_file = os.path.join(
+                out_dir,
+                f"step_timing-{self.args.run_name}-{self.args.profile_timing}"
+                f"-rank{self.args.process_index}-{time.strftime('%Y%m%d-%H%M%S')}.jsonl",
+            )
+            self.add_callback(
+                StepTimingCallback(
+                    self._timer,
+                    out_file,
+                    census_steps=self.args.profile_census_steps,
+                    meta={
+                        "trainer": type(self).__name__,
+                        "model": getattr(self.model.config, "_name_or_path", None),
+                        "per_device_train_batch_size": self.args.per_device_train_batch_size,
+                        "gradient_accumulation_steps": self.args.gradient_accumulation_steps,
+                        "small_batch_ratio": self.args.small_batch_ratio,
+                        "max_steps": self.args.max_steps,
+                        "fp16": self.args.fp16,
+                        "bf16": self.args.bf16,
+                    },
+                )
+            )
+            logger.info(f"Step timing ({self.args.profile_timing}) -> {out_file}")
         if self.args.save_indices:
             self.indices_path = os.path.join(self.args.output_dir, INDICES_DIRNAME)
             os.makedirs(self.indices_path, exist_ok=True)
@@ -121,6 +161,25 @@ class _CoLMTrainerBase(Trainer):
             if torch.cuda.is_available():
                 logs["peak_mem_gb"] = round(torch.cuda.max_memory_allocated() / 1024**3, 3)
         super().log(logs, start_time)
+
+    # ----- step timing: HF loop pieces around the CoLM hooks ------------------
+    def _maybe_log_save_evaluate(self, *args, **kwargs):
+        with self._timer.section("log_save_eval"):
+            return super()._maybe_log_save_evaluate(*args, **kwargs)
+
+    def _clip_grad_norm(self, model):
+        # "optimizer" closes at on_step_end (StepTimingCallback).
+        self._timer.start("optimizer")
+        with self._timer.section("clip_grad"):
+            return super()._clip_grad_norm(model)
+
+    def floating_point_ops(self, inputs):
+        with self._timer.section("hf_floating_point_ops"):
+            return super().floating_point_ops(inputs)
+
+    def _track_num_input_tokens(self, inputs):
+        with self._timer.section("hf_track_input_tokens"):
+            return super()._track_num_input_tokens(inputs)
 
     def _model_inputs(self, inputs: dict) -> dict:
         """Drop collator fields (sources, indices, ...) the model forward does not take."""
@@ -226,29 +285,41 @@ class SubsetTrainer(_CoLMTrainerBase):
 
     # ----- training ---------------------------------------------------------
     def training_step(self, model, inputs, num_items_in_batch=None):
+        with self._timer.section("train"):
+            return self._training_step(model, inputs)
+
+    def _training_step(self, model, inputs):
+        t = self._timer
         if not inputs:
             # Placeholder that keeps the HF loop's accumulation count aligned.
             return torch.zeros((), device=self.args.device)
         weight = inputs.pop(SAMPLE_WEIGHT_KEY, None)
-        model.train()
-        if hasattr(self.optimizer, "train") and callable(self.optimizer.train):
-            self.optimizer.train()
-        inputs = self._prepare_inputs(inputs)
-        with self.compute_loss_context_manager():
-            loss = self.compute_loss(model, inputs)
+        with t.fine("model_train"):
+            model.train()
+            if hasattr(self.optimizer, "train") and callable(self.optimizer.train):
+                self.optimizer.train()
+        with t.section("prepare_inputs"):
+            if t.enabled:
+                t.count("train_h2d_bytes", _nbytes(inputs))
+            inputs = self._prepare_inputs(inputs)
+        with t.section("forward"):
+            with self.compute_loss_context_manager():
+                loss = self.compute_loss(model, inputs)
         if weight is not None:
             loss = loss * weight
         if self.args.n_gpu > 1:
             loss = loss.mean()
         loss = loss / self._num_train_microbatches
-        self.accelerator.backward(loss)
+        with t.section("backward"):
+            self.accelerator.backward(loss)
         # CoLM logs the loss divided by small_batch_ratio (kept from the original
         # implementation so train/loss curves stay comparable).
         return loss.detach() / self.args.small_batch_ratio
 
     # ----- selection --------------------------------------------------------
     def get_batch_samples(self, epoch_iterator, num_batches, device):
-        batch_samples, _ = super().get_batch_samples(epoch_iterator, num_batches, device)
+        with self._timer.section("data"):
+            batch_samples, _ = super().get_batch_samples(epoch_iterator, num_batches, device)
         if not batch_samples:
             return batch_samples, None
         self._micro_step += len(batch_samples)
@@ -256,14 +327,16 @@ class SubsetTrainer(_CoLMTrainerBase):
             # First step: time it from the start of its selection.
             self._last_log = (time.perf_counter(), self.state.global_step)
         start = time.perf_counter()
-        microbatches = self._select_microbatches(batch_samples)
+        with self._timer.section("selection"):
+            microbatches = self._select_microbatches(batch_samples)
         self._select_seconds += time.perf_counter() - start
         return microbatches, None
 
     def _select_microbatches(self, batch_samples: list[dict]) -> list[dict]:
         reps, examples = [], []
         for inputs in batch_samples:
-            rep = self.save_select(inputs)
+            with self._timer.section("features"):
+                rep = self.save_select(inputs)
             # Drop empty / NaN / all-zero features (and zero-valued scalar features).
             if isinstance(rep, (int, float)):
                 if rep == 0:
@@ -296,21 +369,32 @@ class SubsetTrainer(_CoLMTrainerBase):
 
         Returns `(examples, weights)` for this rank, `num_per_rank` of each.
         """
-        _barrier()
-        complete_examples = [ex for exs in _all_gather_object(local_examples) for ex in exs]
-        gathered_reps = _gather_object(local_reps)
+        t = self._timer
+        with t.section("gather"):
+            with t.section("barrier"):
+                _barrier()
+            with t.section("all_gather_examples"):
+                complete_examples = [ex for exs in _all_gather_object(local_examples) for ex in exs]
+            with t.section("gather_reps"):
+                gathered_reps = _gather_object(local_reps)
         total = num_per_rank * self.args.world_size
 
         selection = None
         if self.args.process_index == 0:
-            all_reps = torch.cat(gathered_reps, dim=0).to(self.args.device)
-            selection = self._select_on_main(all_reps, complete_examples, total)
-        selected_idx, selected_weights = _broadcast_object(selection)
-
-        rank = self.args.process_index
-        mine = slice(num_per_rank * rank, num_per_rank * (rank + 1))
-        examples = [dict(complete_examples[i]) for i in selected_idx[mine]]
-        weights = torch.tensor(selected_weights[mine], dtype=torch.float32).to(self.dtype)
+            with t.section("main"):
+                with t.section("reps_h2d"):
+                    all_reps = torch.cat(gathered_reps, dim=0)
+                    t.count("sel_main_h2d_bytes", all_reps.nbytes)
+                    all_reps = all_reps.to(self.args.device)
+                selection = self._select_on_main(all_reps, complete_examples, total)
+        with t.section("scatter"):
+            with t.section("broadcast"):
+                selected_idx, selected_weights = _broadcast_object(selection)
+            with t.section("slice"):
+                rank = self.args.process_index
+                mine = slice(num_per_rank * rank, num_per_rank * (rank + 1))
+                examples = [dict(complete_examples[i]) for i in selected_idx[mine]]
+                weights = torch.tensor(selected_weights[mine], dtype=torch.float32).to(self.dtype)
         return examples, weights
 
     def _select_on_main(self, all_reps, complete_examples, total):
@@ -319,66 +403,84 @@ class SubsetTrainer(_CoLMTrainerBase):
         Returns `(selected_idx, weights)` as python lists of length `total`, indices
         into `complete_examples`.
         """
-        args = self.args
+        args, t = self.args, self._timer
         sampling_indices = np.arange(len(complete_examples))
         max_samples = total
 
         # Sources listed in keep_sources are always trained on and excluded from selection.
         list_idx_keep = []
         if len(args.keep_sources) > 0:
-            include_in_selection = []
-            for idx in sampling_indices:
-                if complete_examples[idx]["sources"][0] in args.keep_sources:
-                    include_in_selection.append(False)
-                    list_idx_keep.append(int(idx))
-                else:
-                    include_in_selection.append(True)
-            max_samples -= len(list_idx_keep)
-            logger.info(
-                f"Exclude {len(list_idx_keep)} examples from selection. Select {max_samples} "
-                f"from the remaining {sum(include_in_selection)} examples."
-            )
-            all_reps = all_reps[include_in_selection]
-            sampling_indices = sampling_indices[include_in_selection]
+            with t.section("keep_sources"):
+                with t.fine("scan"):
+                    include_in_selection = []
+                    for idx in sampling_indices:
+                        if complete_examples[idx]["sources"][0] in args.keep_sources:
+                            include_in_selection.append(False)
+                            list_idx_keep.append(int(idx))
+                        else:
+                            include_in_selection.append(True)
+                    max_samples -= len(list_idx_keep)
+                with t.fine("log"):
+                    logger.info(
+                        f"Exclude {len(list_idx_keep)} examples from selection. Select "
+                        f"{max_samples} from the remaining {sum(include_in_selection)} examples."
+                    )
+                with t.fine("filter_rows"):
+                    all_reps = all_reps[include_in_selection]
+                    sampling_indices = sampling_indices[include_in_selection]
+            t.count("sel_kept_by_source", len(list_idx_keep))
+            t.count("sel_fl_candidates", len(sampling_indices))
+            t.count("sel_fl_budget", max_samples)
 
-        if all_reps.dim() == 1:
-            # Scalar features (completion_length, length_loss_weighted) as 1-D points.
-            all_reps = all_reps.unsqueeze(1)
-        all_reps_squared = torch.square(all_reps)
-        all_reps = self._transform_reps(all_reps)
+        with t.section("transform"):
+            if all_reps.dim() == 1:
+                # Scalar features (completion_length, length_loss_weighted) as 1-D points.
+                all_reps = all_reps.unsqueeze(1)
+            with t.fine("square"):
+                all_reps_squared = torch.square(all_reps)
+            all_reps = self._transform_reps(all_reps)
 
         m_t = v_t = None
         if args.mezo_optim == "adam":
-            all_reps, m_t, v_t = self._adam_update(all_reps, all_reps_squared)
+            with t.section("adam"):
+                all_reps, m_t, v_t = self._adam_update(all_reps, all_reps_squared)
 
         if args.source_wise_selection != "none":
-            source_list = []
-            for idx in sampling_indices:
-                source = complete_examples[idx]["sources"][0]
-                if isinstance(source, torch.Tensor):
-                    source = source.item()
-                source_list.append(source)
-            logger.info(f"Source count: {sorted(Counter(source_list).items())}")
+            with t.section("source_list"):
+                with t.fine("scan"):
+                    source_list = []
+                    for idx in sampling_indices:
+                        source = complete_examples[idx]["sources"][0]
+                        if isinstance(source, torch.Tensor):
+                            source = source.item()
+                        source_list.append(source)
+                with t.fine("log"):
+                    logger.info(f"Source count: {sorted(Counter(source_list).items())}")
         else:
             source_list = None
 
         if args.data_selection_unit not in ["completion_length", "length_loss_weighted"]:
-            if args.mezo_topk == "random":
-                ranked_indices = torch.randperm(len(all_reps[0]))[: args.zo_dim]
-                all_reps = all_reps[:, ranked_indices]
-            else:
-                all_reps = self.select_masking(all_reps, source_list)
+            with t.section("topk_mask"):
+                if args.mezo_topk == "random":
+                    ranked_indices = torch.randperm(len(all_reps[0]))[: args.zo_dim]
+                    all_reps = all_reps[:, ranked_indices]
+                else:
+                    all_reps = self.select_masking(all_reps, source_list)
 
         if max_samples > 0:
-            fl_idx, fl_weights = self.select_data(
-                all_reps, max_samples=max_samples, source_list=source_list
-            )
-            # MeZO keeps its own Adam moments: the mean over the selected subset.
-            if args.mezo_optim == "adam" and "grad" not in args.data_selection_unit:
-                self.prev_m_t = m_t[fl_idx].mean(dim=0).detach()
-                self.prev_v_t = v_t[fl_idx].mean(dim=0).detach()
-            selected_idx = list_idx_keep + sampling_indices[fl_idx].tolist()
-            selected_weights = [1.0] * len(list_idx_keep) + fl_weights.tolist()
+            with t.section("facility_location"):
+                fl_idx, fl_weights = self.select_data(
+                    all_reps, max_samples=max_samples, source_list=source_list
+                )
+            with t.section("index_weights"):
+                # MeZO keeps its own Adam moments: the mean over the selected subset.
+                if args.mezo_optim == "adam" and "grad" not in args.data_selection_unit:
+                    with t.fine("adam_state"):
+                        self.prev_m_t = m_t[fl_idx].mean(dim=0).detach()
+                        self.prev_v_t = v_t[fl_idx].mean(dim=0).detach()
+                with t.fine("index_map"):
+                    selected_idx = list_idx_keep + sampling_indices[fl_idx].tolist()
+                    selected_weights = [1.0] * len(list_idx_keep) + fl_weights.tolist()
         else:
             # More kept examples than the budget: train on the first `total` of them.
             selected_idx = list_idx_keep[:total]
@@ -408,7 +510,8 @@ class SubsetTrainer(_CoLMTrainerBase):
         if all_reps.dtype == torch.long:
             return all_reps
         args = self.args
-        all_reps_norm = torch.norm(torch.mean(all_reps, dim=0), p=2)
+        with self._timer.fine("mean_norm"):
+            all_reps_norm = torch.norm(torch.mean(all_reps, dim=0), p=2)
         if args.mezo_transform == "self_normalize":
             all_reps = all_reps / torch.norm(all_reps, p=2, dim=1, keepdim=True)
         elif args.mezo_transform == "normalize":
@@ -451,11 +554,17 @@ class SubsetTrainer(_CoLMTrainerBase):
                 self.prev_m_t = torch.zeros_like(all_reps[1])
                 self.prev_v_t = torch.zeros_like(all_reps_squared[1])
             prev_m_t, prev_v_t = self.prev_m_t, self.prev_v_t
-        m_t = args.adam_beta1 * prev_m_t + (1 - args.adam_beta1) * all_reps
-        v_t = args.adam_beta2 * prev_v_t + (1 - args.adam_beta2) * all_reps_squared
-        m_hat = m_t / (1 - args.adam_beta1 ** (self.state.global_step + 1))
-        v_hat = v_t / (1 - args.adam_beta2 ** (self.state.global_step + 1))
-        return m_hat / (torch.sqrt(v_hat) + args.adam_epsilon), m_t, v_t
+        t = self._timer
+        with t.fine("m"):
+            m_t = args.adam_beta1 * prev_m_t + (1 - args.adam_beta1) * all_reps
+        with t.fine("v"):
+            v_t = args.adam_beta2 * prev_v_t + (1 - args.adam_beta2) * all_reps_squared
+        with t.fine("bias_correction"):
+            m_hat = m_t / (1 - args.adam_beta1 ** (self.state.global_step + 1))
+            v_hat = v_t / (1 - args.adam_beta2 ** (self.state.global_step + 1))
+        with t.fine("division"):
+            update = m_hat / (torch.sqrt(v_hat) + args.adam_epsilon)
+        return update, m_t, v_t
 
     @staticmethod
     def extract_and_save_original_indices(list_inputs, list_idx, out_file):
@@ -473,12 +582,16 @@ class SubsetTrainer(_CoLMTrainerBase):
         elif isinstance(source_list, list):
             source_list = np.array(source_list)
 
-        masked_reps = torch.zeros((all_reps.shape[0], self.args.zo_dim), dtype=all_reps.dtype).to(
-            all_reps.device
-        )
+        t = self._timer
+        with t.fine("alloc"):
+            masked_reps = torch.zeros(
+                (all_reps.shape[0], self.args.zo_dim), dtype=all_reps.dtype
+            ).to(all_reps.device)
         for source in np.unique(source_list):
-            source_indices = np.where(source_list == source)[0]
-            source_all_reps = all_reps[source_indices]
+            with t.fine("source_indices"):
+                source_indices = np.where(source_list == source)[0]
+            with t.fine("gather_rows"):
+                source_all_reps = all_reps[source_indices]
 
             if self.args.mezo_selection == "weight":
                 weights = torch.cat(
@@ -489,27 +602,35 @@ class SubsetTrainer(_CoLMTrainerBase):
                 else:
                     mean_reps = torch.abs(torch.mean(source_all_reps, dim=0))
             else:
-                mean_reps = torch.abs(torch.mean(source_all_reps, dim=0))
+                with t.fine("mean_abs"):
+                    mean_reps = torch.abs(torch.mean(source_all_reps, dim=0))
 
-            if self.args.mezo_topk == "smallest":
-                ranked_indices = torch.argsort(mean_reps)[: self.args.zo_dim]
-            elif self.args.mezo_topk == "largest":
-                ranked_indices = torch.argsort(mean_reps, descending=True)[: self.args.zo_dim]
-            elif self.args.mezo_topk == "sampling":
-                index_probs = mean_reps.cpu().numpy().astype("float64")
-                index_probs = index_probs / index_probs.sum()
-                ranked_indices = np.random.choice(
-                    len(mean_reps), size=self.args.zo_dim, replace=False, p=index_probs
-                )
-            elif self.args.mezo_topk == "largest_smallest":
-                ranked_indices = torch.cat(
-                    (
-                        torch.argsort(mean_reps)[: (self.args.zo_dim // 2)],
-                        torch.argsort(mean_reps, descending=True)[: (self.args.zo_dim // 2)],
-                    )
-                )
-            masked_reps[source_indices] = source_all_reps[:, ranked_indices]
+            with t.fine("argsort"):
+                ranked_indices = self._rank_coordinates(mean_reps)
+            with t.fine("gather_columns"):
+                masked_reps[source_indices] = source_all_reps[:, ranked_indices]
         return masked_reps
+
+    def _rank_coordinates(self, mean_reps):
+        """Indices of the `zo_dim` kept coordinates by `mezo_topk`."""
+        if self.args.mezo_topk == "smallest":
+            return torch.argsort(mean_reps)[: self.args.zo_dim]
+        elif self.args.mezo_topk == "largest":
+            return torch.argsort(mean_reps, descending=True)[: self.args.zo_dim]
+        elif self.args.mezo_topk == "sampling":
+            index_probs = mean_reps.cpu().numpy().astype("float64")
+            index_probs = index_probs / index_probs.sum()
+            return np.random.choice(
+                len(mean_reps), size=self.args.zo_dim, replace=False, p=index_probs
+            )
+        elif self.args.mezo_topk == "largest_smallest":
+            return torch.cat(
+                (
+                    torch.argsort(mean_reps)[: (self.args.zo_dim // 2)],
+                    torch.argsort(mean_reps, descending=True)[: (self.args.zo_dim // 2)],
+                )
+            )
+        raise ValueError(f"Unknown mezo_topk {self.args.mezo_topk}")
 
     def select_data(self, reps, max_samples, source_list=None):
         """Facility-location selection; returns (indices, cluster-size weights)."""
@@ -520,6 +641,7 @@ class SubsetTrainer(_CoLMTrainerBase):
             y=source_list,
             per_class_start=self.args.num_per_class_start,
             strategy=self.args.source_wise_selection,
+            timer=self._timer,
         )
 
     # ----- per-example features --------------------------------------------
@@ -600,16 +722,20 @@ class SubsetTrainer(_CoLMTrainerBase):
 
     def zo_perturb_parameters(self, random_seed=None, scaling_factor=1):
         """theta <- theta + scaling_factor * eps * z with z ~ N(0, I) regenerated from the seed."""
-        torch.manual_seed(random_seed if random_seed is not None else self.zo_random_seed)
+        t = self._timer
+        with t.fine("seed"):
+            torch.manual_seed(random_seed if random_seed is not None else self.zo_random_seed)
         for _, param in self.named_parameters_to_optim:
-            z = torch.normal(
-                mean=0,
-                std=1,
-                size=param.data.size(),
-                device=param.data.device,
-                dtype=param.data.dtype,
-            )
-            param.data = param.data + scaling_factor * z * self.args.mezo_eps
+            with t.fine("normal"):
+                z = torch.normal(
+                    mean=0,
+                    std=1,
+                    size=param.data.size(),
+                    device=param.data.device,
+                    dtype=param.data.dtype,
+                )
+            with t.fine("add"):
+                param.data = param.data + scaling_factor * z * self.args.mezo_eps
 
     def zo_forward(self, inputs):
         """Loss without gradient and without dropout."""
@@ -641,7 +767,7 @@ class SubsetTrainerEfficient(SubsetTrainer):
         base_model = (
             self.model.get_base_model() if hasattr(self.model, "get_base_model") else self.model
         )
-        self.decomposer = DecomposedPhiCausalLM(base_model)
+        self.decomposer = DecomposedPhiCausalLM(base_model, timer=self._timer)
         self.pad_token_id = self.processing_class.pad_token_id
 
     def _check_args(self):
@@ -668,47 +794,91 @@ class SubsetTrainerEfficient(SubsetTrainer):
         return num_batches * self.new_bs
 
     def _select_microbatches(self, batch_samples: list[dict]) -> list[dict]:
-        reps = torch.cat([self.save_select(inputs) for inputs in batch_samples], dim=0).float()
-        examples = [ex for inputs in batch_samples for ex in _split_examples(_to_cpu(inputs))]
+        t = self._timer
+        reps = []
+        for inputs in batch_samples:
+            with t.section("features"):
+                reps.append(self.save_select(inputs))
+        with t.section("reps_cat"):
+            reps = torch.cat(reps, dim=0).float()
+        with t.section("reps_d2h"):
+            t.count("sel_reps_d2h_bytes", reps.nbytes)
+            reps = reps.cpu()
+        with t.section("examples_to_cpu"):
+            with t.fine("to_cpu"):
+                cpu_batches = [_to_cpu(inputs) for inputs in batch_samples]
+            with t.fine("split"):
+                examples = [ex for inputs in cpu_batches for ex in _split_examples(inputs)]
+        if t.enabled:
+            with t.section("token_stats"):
+                for batch in cpu_batches:
+                    _token_counts(t, "sel", batch)
+                    t.count("sel_examples_d2h_bytes", _nbytes(batch))
         num_per_rank = self._num_select_per_rank(len(batch_samples))
-        selected_examples, _ = self._select_across_ranks(reps.cpu(), examples, num_per_rank)
-        microbatches = [
-            collate_fn(selected_examples[i : i + self.new_bs], self.pad_token_id)
-            for i in range(0, len(selected_examples), self.new_bs)
-        ]
+        selected_examples, _ = self._select_across_ranks(reps, examples, num_per_rank)
+        with t.section("recollate"):
+            microbatches = [
+                collate_fn(selected_examples[i : i + self.new_bs], self.pad_token_id)
+                for i in range(0, len(selected_examples), self.new_bs)
+            ]
+        if t.enabled:
+            with t.section("token_stats"):
+                for batch in microbatches:
+                    _token_counts(t, "train", batch)
         self._num_train_microbatches = len(microbatches)
         return microbatches
 
     def save_select(self, inputs):
         """Per-example MeZO estimates of the last-layer LoRA-B gradient, shape [B, numel]."""
+        t = self._timer
         param = self.named_parameters_to_optim[0][1]
-        intermediate = self.zo_forward_till_penultimate(inputs)
-        self.zo_perturb_parameters(scaling_factor=1)
-        loss1 = self.zo_forward_final_layer(inputs["labels"], intermediate)
-        self.zo_perturb_parameters(scaling_factor=-2)
-        loss2 = self.zo_forward_final_layer(inputs["labels"], intermediate)
-        projected_grads = (loss1 - loss2) / (2 * self.args.mezo_eps)
-        self.zo_perturb_parameters(scaling_factor=1)
+        with t.section("forward_till_penultimate"):
+            intermediate = self.zo_forward_till_penultimate(inputs)
+        with t.section("perturb_plus"):
+            self.zo_perturb_parameters(scaling_factor=1)
+        with t.section("final_layer_plus"):
+            loss1 = self.zo_forward_final_layer(inputs["labels"], intermediate)
+        with t.section("perturb_minus"):
+            self.zo_perturb_parameters(scaling_factor=-2)
+        with t.section("final_layer_minus"):
+            loss2 = self.zo_forward_final_layer(inputs["labels"], intermediate)
+        with t.section("feature"):
+            with t.fine("projected_grad"):
+                projected_grads = (loss1 - loss2) / (2 * self.args.mezo_eps)
+        with t.section("restore"):
+            self.zo_perturb_parameters(scaling_factor=1)
 
-        torch.manual_seed(self.zo_random_seed)
-        z = torch.normal(
-            mean=0, std=1, size=param.data.size(), device=param.data.device, dtype=param.data.dtype
-        )
-        grad_updates = projected_grads.view(-1, *([1] * param.dim())) * z.unsqueeze(0)
-        if self.args.mezo_selection == "weight_grad" and not torch.all(param.data == 0):
-            grad_updates = grad_updates * param.data.unsqueeze(0)
-        return grad_updates.view(len(projected_grads), -1)
+        with t.section("feature"):
+            with t.fine("z_seed"):
+                torch.manual_seed(self.zo_random_seed)
+            with t.fine("z_normal"):
+                z = torch.normal(
+                    mean=0,
+                    std=1,
+                    size=param.data.size(),
+                    device=param.data.device,
+                    dtype=param.data.dtype,
+                )
+            with t.fine("outer_product"):
+                grad_updates = projected_grads.view(-1, *([1] * param.dim())) * z.unsqueeze(0)
+            if self.args.mezo_selection == "weight_grad" and not torch.all(param.data == 0):
+                grad_updates = grad_updates * param.data.unsqueeze(0)
+            return grad_updates.view(len(projected_grads), -1)
 
     def zo_forward_till_penultimate(self, inputs):
-        self.model.eval()
+        t = self._timer
+        with t.fine("model_eval"):
+            self.model.eval()
         with torch.inference_mode():
-            prepared = self._prepare_inputs(dict(inputs))
+            with t.fine("prepare_inputs"):
+                prepared = self._prepare_inputs(dict(inputs))
             return self.decomposer.forward_till_penultimate(
                 input_ids=prepared["input_ids"], attention_mask=prepared["attention_mask"]
             )
 
     def zo_forward_final_layer(self, labels, intermediate):
-        self.model.eval()
+        with self._timer.fine("model_eval"):
+            self.model.eval()
         with torch.inference_mode():
             loss, _ = self.decomposer.forward_final_layer(
                 intermediate, labels=labels, per_sample_loss=True

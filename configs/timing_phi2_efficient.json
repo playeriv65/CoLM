@@ -1,0 +1,14 @@
+{
+    "model_name_or_path": "microsoft/phi-2",
+    "train_files": ["data/MathInstruct.jsonl"],
+    "max_steps": 130,
+    "per_device_train_batch_size": 4,
+    "gradient_accumulation_steps": 8,
+    "efficient_mezo": true,
+    "save_strategy": "no",
+    "logging_steps": 1,
+    "report_to": "none",
+    "profile_timing": "fine",
+    "profile_timing_dir": "logs",
+    "profile_census_steps": 10
+}
