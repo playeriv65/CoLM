@@ -29,11 +29,10 @@ run_task_on_gpu() {
     echo "Writing outputs to $task_output_dir"
     mkdir -p $task_output_dir
     
-    eval_command="python eval_superglue.py \
+    eval_command="uv run --frozen python -u eval_superglue.py \
         --model $model/${task}/checkpoint-${ckpt} \
         --task $task \
-        --max_length 2048 \
-        --cache_dir /data/hf_models"
+        --max_length 2048"
 
     echo $eval_command
 
@@ -66,7 +65,7 @@ run_task_on_gpu() {
 
 for ckpt in 20 40 60 80
 do
-    devices=(0 1 2 3)
+    IFS=',' read -r -a devices <<< "${COLM_GPUS:?Set COLM_GPUS to the reserved GPU ids, e.g. COLM_GPUS=2,3}"
     task_list=("SST2" "CB" "MultiRC")
     num_gpus=${#devices[@]}
     num_tasks=${#task_list[@]}

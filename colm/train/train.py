@@ -1,157 +1,189 @@
 #!/usr/bin/env python
-# coding=utf-8
+import json
 import logging
 import os
 import sys
-import json
 
 import datasets
 import torch
 import torch.distributed as dist
 import transformers
+from peft import LoraConfig, PeftModel, TaskType, get_peft_model
 from transformers import (
-    set_seed,
+    AutoConfig,
     AutoModelForCausalLM,
     AutoTokenizer,
-    HfArgumentParser,
-    AutoConfig,
-    PhiConfig,
     DataCollatorForSeq2Seq,
-    DataCollatorForTokenClassification)
-from peft import LoraConfig, PeftModel, TaskType, get_peft_model
+    DataCollatorForTokenClassification,
+    HfArgumentParser,
+    PhiConfig,
+    set_seed,
+)
 
 from colm.data.get_training_dataset import (
+    DataCollatorForSupervisedDataset,
+    DataCollatorForSupervisedDatasetWithSource,
+    HFDataset,
+    SupervisedDataset,
     convert_superglue_to_hf,
     convert_superglue_to_hf_source,
     get_training_dataset,
-    SupervisedDataset,
-    HFDataset,
-    DataCollatorForSupervisedDataset,
-    DataCollatorForSupervisedDatasetWithSource)
-from colm.data.tasks import get_task, Sample
-from colm.data.utils import (
-    forward_wrap_with_option_len,
-    NondiffCollator,
-    DataCollatorWithPaddingAndNesting
 )
-from colm.train.huggingface_trainer import CustomTrainer as Trainer
-from colm.train.subset_trainer_distributed import SubsetTrainer, SubsetTrainerEfficient
+from colm.data.tasks import Sample, get_task
+from colm.data.utils import (
+    DataCollatorWithPaddingAndNesting,
+    NondiffCollator,
+    forward_wrap_with_option_len,
+)
 from colm.train.data_arguments import DataArguments, get_data_statistics
 from colm.train.model_arguments import ModelArguments, add_padding_to_tokenizer
+from colm.train.trainers import CustomTrainer, SubsetTrainer, SubsetTrainerEfficient
 from colm.train.training_arguments import TrainingArguments
-from colm.train.custom_phi import DecomposedPhiCausalLM
-
 
 logger = logging.getLogger(__name__)
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 DTYPES = {
-    'float32': torch.float32,
-    'bfloat16': torch.bfloat16,
-    'float16': torch.float16,
-    'auto': 'auto',
-    'none': None
+    "float32": torch.float32,
+    "bfloat16": torch.bfloat16,
+    "float16": torch.float16,
+    "auto": "auto",
+    # transformers 4.x loaded weights in fp32 when no dtype was given; v5 defaults to
+    # the checkpoint dtype, so "none" is pinned to fp32 to keep the original recipe.
+    "none": torch.float32,
 }
 
 
+def default_output_dir(model_args, data_args, training_args) -> str:
+    """Descriptive run directory, e.g. out/phi-2-MathInstruct-lora-gas8-bs4-mezo-eff-...-seed0."""
+    model_name = model_args.model_name_or_path.rstrip("/").split("/")[-1]
+    task = os.path.splitext(os.path.basename(data_args.train_files[0]))[0]
+    parts = [
+        model_name,
+        task,
+        "lora" if model_args.lora else "full",
+        f"gas{training_args.gradient_accumulation_steps}",
+        f"bs{training_args.per_device_train_batch_size}",
+    ]
+    if training_args.data_selection_method != "none":
+        layers = "+".join(layer.split(".")[-1] for layer in training_args.last_layers)
+        parts += [
+            training_args.data_selection_method,
+            training_args.data_selection_unit + ("-eff" if training_args.efficient_mezo else ""),
+            f"r{training_args.small_batch_ratio}",
+            layers,
+            f"{training_args.zo_dim}_{training_args.mezo_topk}_{training_args.mezo_selection}",
+        ]
+    parts += [f"{training_args.max_steps}steps", f"seed{training_args.seed}"]
+    return os.path.join(data_args.output_root, "-".join(parts))
+
+
+def configure_wandb(training_args):
+    """W&B is opt-in: only touched when report_to explicitly contains it."""
+    report_to = training_args.report_to or []
+    if isinstance(report_to, str):
+        report_to = [report_to]
+    if "wandb" not in report_to:
+        return
+    for env, value in [
+        ("WANDB_ENTITY", training_args.wandb_entity),
+        ("WANDB_PROJECT", training_args.wandb_project),
+        ("WANDB_NOTES", training_args.wandb_notes),
+    ]:
+        if value:
+            os.environ[env] = value
+    os.environ.setdefault("WANDB_NAME", f"{training_args.run_name}_{os.uname()[1]}")
+
+
 def main():
-    parser = HfArgumentParser(
-        (ModelArguments, DataArguments, TrainingArguments))
+    parser = HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         model_args, data_args, training_args = parser.parse_json_file(
-            json_file=os.path.abspath(sys.argv[1]))
+            json_file=os.path.abspath(sys.argv[1])
+        )
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
-    # Auto-infer lora_target_modules if not specified
     if not model_args.lora_target_modules:
         if "phi-2" in model_args.model_name_or_path:
             model_args.lora_target_modules = ["q_proj", "k_proj", "v_proj", "fc1", "fc2"]
         else:  # Llama, zephyr
             model_args.lora_target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
-        logger.info(f"Auto-inferred lora_target_modules: {model_args.lora_target_modules}")
 
-    # Auto-infer fp16/bf16 if not explicitly set
-    if not training_args.fp16 and not training_args.bf16:
+    if model_args.precision == "auto" and not training_args.fp16 and not training_args.bf16:
         if "phi-2" in model_args.model_name_or_path or "Llama" in model_args.model_name_or_path:
             training_args.fp16 = True
             model_args.torch_dtype = "none"
         else:  # zephyr
             training_args.bf16 = True
             model_args.torch_dtype = "bfloat16"
-        logger.info(f"Auto-inferred fp16={training_args.fp16}, bf16={training_args.bf16}")
+    elif model_args.precision == "fp32":
+        training_args.fp16 = training_args.bf16 = False
+        model_args.torch_dtype = "float32"
+    # Mixed precision is resolved in TrainingArguments.__post_init__; keep it in sync.
+    training_args.mixed_precision = (
+        "fp16" if training_args.fp16 else "bf16" if training_args.bf16 else "no"
+    )
 
-    # Auto-generate output_dir if not specified
-    if training_args.output_dir is None:
-        model_name = model_args.model_name_or_path.split("/")[-1]
-        training_args.output_dir = f"./out/{model_name}-{training_args.max_steps}steps-seed{training_args.seed}"
-        logger.info(f"Auto-generated output_dir: {training_args.output_dir}")
+    if training_args.output_dir_is_auto:
+        training_args.output_dir = default_output_dir(model_args, data_args, training_args)
+    if training_args.run_name is None or training_args.run_name == training_args.output_dir:
+        training_args.run_name = os.path.basename(training_args.output_dir)
 
-    # Set run_name for wandb
-    training_args.run_name = training_args.output_dir.split('/')[-1]
-
-    # Setup logging
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
         datefmt="%m/%d/%Y %H:%M:%S",
         handlers=[logging.StreamHandler(sys.stdout)],
     )
-
     if training_args.should_log:
-        # The default of training_args.log_level is passive, so we set log level at info here to have that default.
         transformers.utils.logging.set_verbosity_info()
-
     log_level = training_args.get_process_log_level()
     logger.setLevel(log_level)
+    logging.getLogger("colm").setLevel(log_level)
     datasets.utils.logging.set_verbosity(log_level)
     transformers.utils.logging.set_verbosity(log_level)
     transformers.utils.logging.enable_default_handler()
     transformers.utils.logging.enable_explicit_format()
 
-    # Log on each process the small summary:
     logger.warning(
-        f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}"
-        + f"distributed training: {bool(training_args.local_rank != -1)}, 16-bits training: {training_args.fp16}"
+        f"Process rank: {training_args.local_process_index}, device: {training_args.device}, "
+        f"n_gpu: {training_args.n_gpu}, distributed training: {training_args.world_size > 1}, "
+        f"fp16: {training_args.fp16}, bf16: {training_args.bf16}"
     )
     logger.info(f"Training parameters {training_args}")
     logger.info(f"Model parameters {model_args}")
     logger.info(f"Dataset parameters {data_args}")
 
-    # Set seed before initializing model.
     set_seed(training_args.seed)
 
     tokenizer = AutoTokenizer.from_pretrained(
-        model_args.model_name_or_path,
-        model_max_length=model_args.model_max_length)
-
+        model_args.tokenizer_name or model_args.model_name_or_path,
+        model_max_length=model_args.model_max_length,
+        cache_dir=model_args.cache_dir,
+        revision=model_args.model_revision,
+    )
+    model_kwargs = dict(
+        dtype=DTYPES[model_args.torch_dtype],
+        trust_remote_code=model_args.trust_remote_code,
+        cache_dir=model_args.cache_dir,
+        revision=model_args.model_revision,
+        attn_implementation=model_args.attn_implementation,
+    )
     if not model_args.enable_dropout:
-        # Set dropout to 0
         logger.info("Set dropout to 0")
         model_config = AutoConfig.from_pretrained(
-            model_args.model_name_or_path, cache_dir=model_args.cache_dir)
-        assert isinstance(
-            model_config, PhiConfig), "Only support no dropout for Phi-2!"
+            model_args.config_name or model_args.model_name_or_path, cache_dir=model_args.cache_dir
+        )
+        assert isinstance(model_config, PhiConfig), "Only support no dropout for Phi-2!"
         model_config.resid_pdrop = 0
         model_args.lora_dropout = 0
-        model = AutoModelForCausalLM.from_pretrained(
-            model_args.model_name_or_path,
-            config=model_config,
-            torch_dtype=DTYPES[model_args.torch_dtype],
-            trust_remote_code=True,
-            cache_dir=model_args.cache_dir)
-    else:
-        model = AutoModelForCausalLM.from_pretrained(
-            model_args.model_name_or_path,
-            torch_dtype=DTYPES[model_args.torch_dtype],
-            trust_remote_code=True,
-            cache_dir=model_args.cache_dir)
+        model_kwargs["config"] = model_config
+    model = AutoModelForCausalLM.from_pretrained(model_args.model_name_or_path, **model_kwargs)
 
-    if len(training_args.fsdp) > 0 and training_args.fsdp_config.get('activation_checkpointing', False):
-        # Enable gradient checkpointing for reducing memory footprint
-        # Bug in future torch version
-        # https://huggingface.co/mistralai/Mixtral-8x7B-v0.1/discussions/12
+    if training_args.fsdp and (training_args.fsdp_config or {}).get(
+        "activation_checkpointing", False
+    ):
         logger.info("Enable gradient checkpointing")
-        model.gradient_checkpointing_enable(
-            gradient_checkpointing_kwargs={'use_reentrant': True})
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": True})
     add_padding_to_tokenizer(tokenizer)
 
     # Resize embeddings if needed (e.g. for LlamaTokenizer)
@@ -159,15 +191,9 @@ def main():
     modules_to_save = []
     if len(tokenizer) > embedding_size:
         model.resize_token_embeddings(len(tokenizer))
-        # if you load lora model and resize the token embeddings, the requires_grad flag is set to True for embeddings
-        if isinstance(model, PeftModel):
-            model.get_input_embeddings().weight.requires_grad = False
-            model.get_output_embeddings().weight.requires_grad = False
-        # Adding additional tokens to vocabulary
         # https://github.com/huggingface/peft/issues/334
         modules_to_save = ["lm_head", "embed_tokens"]
 
-    # Set up LoRA
     if not isinstance(model, PeftModel) and model_args.lora:
         lora_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
@@ -176,215 +202,158 @@ def main():
             lora_alpha=model_args.lora_alpha,
             lora_dropout=model_args.lora_dropout,
             target_modules=model_args.lora_target_modules,
-            modules_to_save=modules_to_save
+            modules_to_save=modules_to_save,
         )
         model = get_peft_model(model, lora_config)
         # ValueError: Attempting to unscale FP16 gradients
         # https://github.com/huggingface/peft/issues/341
-        model.base_model.model.model.embed_tokens.weight.data = model.base_model.model.model.embed_tokens.weight.data.float()
-        model.base_model.model.lm_head.weight.data = model.base_model.model.lm_head.weight.data.float()
-        logger.info(
-            f"Applied LoRA to model."
-        )
+        base = model.get_base_model()
+        base.model.embed_tokens.weight.data = base.model.embed_tokens.weight.data.float()
+        base.lm_head.weight.data = base.lm_head.weight.data.float()
+        logger.info("Applied LoRA to model.")
         model.print_trainable_parameters()
+        model.enable_input_require_grads()
+        # The perturbed / selected tensors are the LoRA B matrices of the last layer.
+        training_args.last_layers = [name + ".lora_B" for name in training_args.last_layers]
 
-        # for checkpointing
-        if hasattr(model, "enable_input_require_grads"):
-            model.enable_input_require_grads()
-        else:
-            def make_inputs_require_grad(module, input, output):
-                output.requires_grad_(True)
-            model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
-
-        # Change last layer to LoRA
-        training_args.last_layers = [
-            name + '.lora_B' for name in training_args.last_layers]
-
-    model_params = sum(p.numel()
-                       for p in model.parameters() if p.requires_grad)
-    logger.info(f"trainable model_params: {model_params}")
-
-    if dist.is_initialized() and dist.get_rank() == 0:
+    logger.info(
+        f"trainable model_params: {sum(p.numel() for p in model.parameters() if p.requires_grad)}"
+    )
+    if not dist.is_initialized() or dist.get_rank() == 0:
         print(model)
-    elif not dist.is_initialized():
-        print(model)
-    # Load training dataset
-    if 'superglue' in data_args.train_files[0]:
-        task_name = data_args.train_files[0].split('-')[-1]
+
+    analysis_dataset = None
+    if "superglue" in data_args.train_files[0]:
+        task_name = data_args.train_files[0].split("-")[-1]
         task = get_task(task_name)
-        if data_args.train_files[0].split('-')[0] == "load":
-            with open('/data/' + f'{data_args.train_files[0]}.jsonl', 'r') as f:
-                train_samples = [Sample(**json.loads(line)) for line in f.readlines()]
-            print("Load Successfully")
+        if data_args.train_files[0].split("-")[0] == "load":
+            with open(os.path.join(data_args.data_dir, f"{data_args.train_files[0]}.jsonl")) as f:
+                train_samples = [Sample(**json.loads(line)) for line in f]
         else:
             train_samples = task.sample_subset(num=1000)
-        if (training_args.source_wise_selection != "none"):
-            train_dataset = HFDataset(convert_superglue_to_hf_source(
-                train_samples,
-                task,
-                tokenizer=tokenizer,
-                max_length=model_args.model_max_length,
-                max_new_tokens=training_args.max_new_tokens,
-                non_diff=training_args.non_diff,
-                train_as_classification=task.classification,
-                only_train_option=training_args.only_train_option
-            ))
-        else:
-            train_dataset = HFDataset(convert_superglue_to_hf(
-                train_samples,
-                task,
-                tokenizer=tokenizer,
-                max_length=model_args.model_max_length,
-                max_new_tokens=training_args.max_new_tokens,
-                non_diff=training_args.non_diff,
-                train_as_classification=task.classification,
-                only_train_option=training_args.only_train_option
-            ))
+        convert = (
+            convert_superglue_to_hf_source
+            if training_args.source_wise_selection != "none"
+            else convert_superglue_to_hf
+        )
+        convert_kwargs = dict(
+            task=task,
+            tokenizer=tokenizer,
+            max_length=model_args.model_max_length,
+            max_new_tokens=training_args.max_new_tokens,
+            non_diff=training_args.non_diff,
+            train_as_classification=task.classification,
+            only_train_option=training_args.only_train_option,
+        )
+        train_dataset = HFDataset(convert(train_samples, **convert_kwargs))
         logger.info(
-            f'Train dataset of task {task_name} has {len(train_samples)} examples with attributes generation = {task.generation} and classification = {task.classification}')
-        logger.info(f'TRAIN DATASET EXAMPLE: {train_samples[0]}')
-
-        analysis_dataset = None
+            f"Train dataset of task {task_name} has {len(train_samples)} examples with attributes "
+            f"generation = {task.generation} and classification = {task.classification}"
+        )
+        logger.info(f"TRAIN DATASET EXAMPLE: {train_samples[0]}")
         if training_args.analysis_mode:
-            analysis_dataset = HFDataset(convert_superglue_to_hf(
-                task.samples["valid"],
-                task,
-                tokenizer=tokenizer,
-                max_length=model_args.model_max_length,
-                max_new_tokens=training_args.max_new_tokens,
-                non_diff=training_args.non_diff,
-                train_as_classification=task.classification,
-                only_train_option=training_args.only_train_option
-            ))
+            analysis_dataset = HFDataset(
+                convert_superglue_to_hf(task.samples["valid"], **convert_kwargs)
+            )
 
         # Change forward pass of model for SuperGLUE
         if training_args.only_train_option and not training_args.non_diff:
             training_args.modify_forward = True
             model.original_forward = model.forward
-            model.forward = forward_wrap_with_option_len.__get__(
-                model, type(model))
+            model.forward = forward_wrap_with_option_len.__get__(model, type(model))
 
-        # Get data collator
         if task.classification:
-            data_collator = DataCollatorWithPaddingAndNesting(
-                tokenizer, pad_to_multiple_of=8)
+            data_collator = DataCollatorWithPaddingAndNesting(tokenizer, pad_to_multiple_of=8)
         elif training_args.non_diff:
             data_collator = NondiffCollator(tokenizer, pad_to_multiple_of=8)
         else:
-            data_collator = DataCollatorForTokenClassification(
-                tokenizer, pad_to_multiple_of=8)
+            data_collator = DataCollatorForTokenClassification(tokenizer, pad_to_multiple_of=8)
     else:
-        # Change forward pass of model for efficient zeroth-order gradient
-        if training_args.data_selection_unit == "mezo" and training_args.efficient_mezo:
-            model.decomposer = DecomposedPhiCausalLM(model.model)
         train_dataset = get_training_dataset(
             data_args.train_files,
             tokenizer=tokenizer,
             max_seq_length=data_args.max_seq_length,
             sample_percentage=data_args.percentage,
             subset_index_files=data_args.subset_index_files,
-            seed=data_args.sample_data_seed)
+            seed=data_args.sample_data_seed,
+            hf_datasets_cache_dir=data_args.hf_datasets_cache_dir,
+        )
+        logger.info(f"TRAIN DATASET: {train_dataset[0].keys()}")
+        logger.info(f"TRAIN DATASET EXAMPLE: {train_dataset[0]}")
 
-        logger.info(f'TRAIN DATASET: {train_dataset[0].keys()}')
-        logger.info(f'TRAIN DATASET EXAMPLE: {train_dataset[0]}')
-
-        # Get data collator
         if isinstance(train_dataset, SupervisedDataset):
-            if (training_args.source_wise_selection != "none") or (not training_args.remove_unused_columns):
-                data_collator = DataCollatorForSupervisedDatasetWithSource(
-                    tokenizer=tokenizer)
+            if (
+                training_args.source_wise_selection != "none"
+                or not training_args.remove_unused_columns
+            ):
+                data_collator = DataCollatorForSupervisedDatasetWithSource(tokenizer=tokenizer)
             else:
-                data_collator = DataCollatorForSupervisedDataset(
-                    tokenizer=tokenizer)
+                data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
         else:
             data_collator = DataCollatorForSeq2Seq(
-                tokenizer=tokenizer, model=model, padding="longest")
+                tokenizer=tokenizer, model=model, padding="longest"
+            )
 
-        get_data_statistics(train_dataset, is_custom_dataset=isinstance(
-            train_dataset, SupervisedDataset))
+        get_data_statistics(
+            train_dataset, is_custom_dataset=isinstance(train_dataset, SupervisedDataset)
+        )
 
-        if "features" in train_dataset and "dataset" in train_dataset.features:
-            train_dataset = train_dataset.remove_columns(
-                ["dataset", "id", "messages"])
-
-        analysis_dataset = None
-        if training_args.analysis_mode:
-            from colm.data.get_validation_dataset import get_dataset
-            analysis_dataset = get_dataset(
-                training_args.analysis_dataset,
-                data_dir=data_args.data_dir,
-                tokenizer=tokenizer,
-                max_length=data_args.max_seq_length)
+        if (
+            not isinstance(train_dataset, SupervisedDataset)
+            and "dataset" in train_dataset.column_names
+        ):
+            train_dataset = train_dataset.remove_columns(["dataset", "id", "messages"])
 
     logger.info(f"Using data collator {type(data_collator)}")
 
-    if len(training_args.keep_sources) and isinstance(data_collator, DataCollatorForSupervisedDatasetWithSource):
-        training_args.keep_sources = [
-            int(source_idx) for source_idx in training_args.keep_sources.split('_')]
-        logger.info(
-            "Keep all examples of the following sources in the mini-batch.")
-
+    if len(training_args.keep_sources) and isinstance(
+        data_collator, DataCollatorForSupervisedDatasetWithSource
+    ):
+        training_args.keep_sources = [int(idx) for idx in training_args.keep_sources.split("_")]
+        logger.info("Keep all examples of the following sources in the mini-batch.")
         for source_idx in training_args.keep_sources:
             logger.info(train_dataset.all_data_sources[source_idx])
     else:
         training_args.keep_sources = []
-
     logger.info(f"Keep source indices in {training_args.keep_sources}")
 
-    # If the actual train batch size is smaller than the data loader batch size
-    kwargs = {}
-    kwargs["logger"] = logger
-
     if training_args.data_selection_method == "none":
-        logger.info("Using HuggingFace Trainer")
-        trainer_class = Trainer
+        trainer_class = CustomTrainer
     elif training_args.efficient_mezo:
-        logger.info("Using SubsetTrainerEfficient")
         trainer_class = SubsetTrainerEfficient
     else:
-        logger.info("Using SubsetTrainer")
         trainer_class = SubsetTrainer
+    logger.info(f"Using {trainer_class.__name__}")
 
-    # Setup wandb
-    os.environ["WANDB_ENTITY"] = training_args.wandb_entity
-    os.environ["WANDB_PROJECT"] = training_args.wandb_project
-    os.environ["WANDB_NAME"] = training_args.run_name + f'_{os.uname()[1]}'
-    os.environ["WANDB_NOTES"] = training_args.wandb_notes
-    logger.info('Finished wandb setup.')
+    configure_wandb(training_args)
 
     trainer = trainer_class(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=analysis_dataset,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         data_collator=data_collator,
-        **kwargs
     )
 
-    # Training
-    train_result = trainer.train(
-        resume_from_checkpoint=model_args.checkpoint_path)
-    if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-        max_mem_gb = torch.cuda.max_memory_allocated() / 1024**3
-        logger.info(f"Peak GPU memory: {max_mem_gb:.2f} GB")
+    train_result = trainer.train(resume_from_checkpoint=model_args.checkpoint_path)
+    if torch.cuda.is_available() and trainer.is_world_process_zero():
+        logger.info(f"Peak GPU memory: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
 
-    trainer.save_model()  # Saves the tokenizer too for easy upload
-
+    trainer.save_model()
     metrics = train_result.metrics
-
     metrics["train_samples"] = len(train_dataset)
-
+    if torch.cuda.is_available():
+        metrics["peak_memory_allocated_gb"] = torch.cuda.max_memory_allocated() / 1024**3
     trainer.log_metrics("train", metrics)
     trainer.save_metrics("train", metrics)
     trainer.save_state()
 
-    # remove the full model in the end to save space, only adapter is needed
+    # Only the adapter is needed; drop a full FSDP state dict if one was written.
     if isinstance(model, PeftModel):
-        pytorch_model_path = os.path.join(
-            training_args.output_dir, "pytorch_model_fsdp.bin")
-        os.remove(pytorch_model_path) if os.path.exists(
-            pytorch_model_path) else None
+        pytorch_model_path = os.path.join(training_args.output_dir, "pytorch_model_fsdp.bin")
+        if os.path.exists(pytorch_model_path):
+            os.remove(pytorch_model_path)
 
 
 if __name__ == "__main__":

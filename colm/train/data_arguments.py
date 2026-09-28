@@ -1,80 +1,51 @@
-import logging
 from dataclasses import dataclass, field
-from typing import List, Optional
 
 import torch
 
 
-logger = logging.getLogger(__name__)
-
-
-def none_or_str(value):
-    print(value)
-    if value == "None":
-        return None
-    else:
-        return value
-
-
 @dataclass
 class DataArguments:
-    train_files: List[str] = field(default_factory=list, metadata={
-                                   "help": "The input training data files (multiple files in glob format)."})
-    overwrite_cache: bool = field(
-        default=False, metadata={"help": "Overwrite the cached training and evaluation sets"}
+    train_files: list[str] = field(
+        default_factory=list, metadata={"help": "Training data files (jsonl) or a hub dataset id."}
     )
-    preprocessing_num_workers: Optional[int] = field(
-        default=None,
-        metadata={"help": "The number of processes to use for the preprocessing."},
+    data_dir: str = field(default="data", metadata={"help": "Directory of the local data files."})
+    hf_datasets_cache_dir: str | None = field(
+        default=None, metadata={"help": "datasets cache override (default: $HF_HOME)."}
     )
-    max_seq_length: Optional[int] = field(
-        default=None,
-        metadata={
-            "help": ("The maximum total input sequence length after tokenization. Sequences longer than this will be truncated,")
-        },
+    max_seq_length: int | None = field(
+        default=512, metadata={"help": "Maximum total input sequence length after tokenization."}
     )
-    sample_data_seed: int = field(
-        default=42, metadata={"help": ("The seed used for data sampling.")},
+    sample_data_seed: int = field(default=42, metadata={"help": "Seed used for data sampling."})
+    percentage: float = field(default=1.0, metadata={"help": "Sampling percentage of the data."})
+    subset_index_files: list[str] = field(
+        default_factory=list, metadata={"help": "Files with subset indices to train on."}
     )
-    percentage: float = field(
-        default=1.0, metadata={"help": ("Sampling percentage for each dataset")},
+    output_root: str = field(
+        default="out", metadata={"help": "Parent directory of auto-named output directories."}
     )
-    subset_index_files: List[str] = field(
-        default_factory=list, metadata={"help": "The input training data files (multiple files in glob format)."})
 
 
 def get_data_statistics(lm_datasets, is_custom_dataset=False):
-    """ Get the data statistics of the dataset. """
+    """Print the number of examples and the average (completion) length."""
+
     def get_length(examples):
         lengths = [len(ids) for ids in examples["input_ids"]]
-
-        completion_lens = []
-        for labels in examples["labels"]:
-            com_len = (torch.tensor(labels) > -1).sum()
-            completion_lens.append(com_len)
+        completion_lens = [(torch.tensor(labels) > -1).sum() for labels in examples["labels"]]
         return {"length": lengths, "c_length": completion_lens}
 
     if not isinstance(lm_datasets, dict):
         lm_datasets = {"train": lm_datasets}
 
-    for key in lm_datasets:
-        dataset = lm_datasets[key]
+    for key, dataset in lm_datasets.items():
         data_size = len(dataset)
         if not is_custom_dataset:
             dataset = dataset.map(get_length, batched=True)
             lengths = dataset["length"]
             c_lengths = dataset["c_length"]
         else:
-            lengths = []
-            c_lengths = []
-            
-            for example in dataset:
-                lengths.append(len(example["input_ids"]))
-                c_lengths.append(len(example["labels"]))
-                
-        length = sum(lengths) / len(lengths)
-        c_length = sum(c_lengths) / len(c_lengths)
+            lengths = [len(example["input_ids"]) for example in dataset]
+            c_lengths = [len(example["labels"]) for example in dataset]
+        print(f"[{key} set] examples: {data_size}; # avg tokens: {sum(lengths) / len(lengths)}")
         print(
-            f"[{key} set] examples: {data_size}; # avg tokens: {length}")
-        print(
-            f"[{key} set] examples: {data_size}; # avg completion tokens: {c_length}")
+            f"[{key} set] examples: {data_size}; # avg completion tokens: {sum(c_lengths) / len(c_lengths)}"
+        )

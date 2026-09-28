@@ -1,0 +1,60 @@
+[project]
+name = "colm"
+version = "0.2.0"
+description = "CoLM: mini-batch coresets for memory-efficient LM training on data mixtures"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "torch==2.13.0",
+    "transformers>=5.17",
+    "accelerate>=1.15",
+    "peft>=0.21",
+    "datasets>=5.0.1",
+    "numpy>=2.3",
+    "pandas>=2.3",
+    "safetensors",
+    "tqdm",
+    "torchmetrics>=1.8",
+    "submodlib-py",
+]
+
+[project.optional-dependencies]
+# Experiment tracking is opt-in: nothing imports wandb unless report_to includes it.
+wandb = ["wandb"]
+# Math evaluation with vLLM (stock vLLM, LoRA through LoRARequest).
+eval = ["vllm==0.30.0"]
+
+[dependency-groups]
+dev = ["ruff", "pytest"]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu130" }]
+submodlib-py = { git = "https://github.com/decile-team/submodlib" }
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.setuptools.packages.find]
+include = ["colm*"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["math_eval/dataset"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501", "B905"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

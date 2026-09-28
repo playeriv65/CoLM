@@ -1,99 +1,62 @@
-import logging
 from dataclasses import dataclass, field
-from typing import List, Optional
-
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
 class ModelArguments:
-    """
-    Arguments pertaining to which model/config/tokenizer we are going to fine-tune, or train from scratch.
-    """
+    """Which model/config/tokenizer to fine-tune."""
 
-    model_name_or_path: Optional[str] = field(
-        default=None,
-        metadata={
-            "help": (
-                "The model checkpoint for weights initialization. Don't set if you want to train a model from scratch."
-            )
-        },
+    model_name_or_path: str | None = field(
+        default=None, metadata={"help": "Model checkpoint (hub id or local path)."}
     )
-    checkpoint_path: Optional[str] = field(
-        default=None,
-        metadata={
-            "help": (
-                "The model checkpoint for resume training. Don't set if you want to train a model from scratch."
-            )
-        },
+    checkpoint_path: str | None = field(
+        default=None, metadata={"help": "Trainer checkpoint to resume training from."}
     )
-    config_name: Optional[str] = field(
-        default=None, metadata={"help": "Pretrained config name or path if not the same as model_name"}
+    config_name: str | None = field(
+        default=None, metadata={"help": "Config name or path if not the same as model_name."}
     )
-    tokenizer_name: Optional[str] = field(
-        default=None, metadata={"help": "Pretrained tokenizer name or path if not the same as model_name"}
+    tokenizer_name: str | None = field(
+        default=None, metadata={"help": "Tokenizer name or path if not the same as model_name."}
     )
-    model_max_length: Optional[int] = field(
-        default=512,
-        metadata={
-            "help": ("The maximum total input sequence length after tokenization. Sequences longer than this will be truncated,")
-        },
+    model_max_length: int = field(
+        default=512, metadata={"help": "Maximum sequence length; longer sequences are truncated."}
     )
-    cache_dir: Optional[str] = field(
-        default=None,
-        metadata={
-            "help": "Where do you want to store the pretrained models downloaded from huggingface.co"},
+    cache_dir: str | None = field(
+        default=None, metadata={"help": "HF cache override (default: $HF_HOME)."}
     )
-    use_fast_tokenizer: bool = field(
-        default=True,
-        metadata={
-            "help": "Whether to use one of the fast tokenizer (backed by the tokenizers library) or not."},
+    model_revision: str = field(default="main", metadata={"help": "Model revision."})
+    trust_remote_code: bool = field(
+        default=False, metadata={"help": "Allow custom modeling code from the hub."}
     )
-    model_revision: str = field(
-        default="main",
-        metadata={
-            "help": "The specific model version to use (can be a branch name, tag name or commit id)."},
+    attn_implementation: str = field(
+        default="sdpa", metadata={"help": "Attention kernel: sdpa, eager, flash_attention_2."}
     )
-    use_auth_token: bool = field(
-        default=False,
-        metadata={
-            "help": (
-                "Will use the token generated when running `huggingface-cli login` (necessary to use this script "
-                "with private models)."
-            )
-        },
-    )
-    torch_dtype: Optional[str] = field(
+    torch_dtype: str = field(
         default="none",
         metadata={
-            "help": (
-                "Override the default `torch.dtype` and load the model under this dtype. If `auto` is passed, the "
-                "dtype will be automatically derived from the model's weights."
-            ),
+            "help": "Load dtype of the base weights; 'none' means float32.",
             "choices": ["auto", "bfloat16", "float16", "float32", "none"],
         },
     )
-
-    ### added ####
-    lora: Optional[bool] = field(default=True, metadata={
-                                 "help": "whether to use lora"})
-    lora_r: Optional[int] = field(default=128, metadata={"help": ("r for lora")})
-    lora_alpha: Optional[float]=field(default=512, metadata={"help": ("alpha for lora")})
-    lora_dropout: Optional[float]=field(default=0.05, metadata={"help": ("dropout for lora")})
-    lora_target_modules: List[str]=field(
-        default_factory=list, metadata={"help": ("target modules for lora")})
-    enable_dropout: bool = field(
-        default=True,
+    precision: str = field(
+        default="auto",
         metadata={
-            "help": (
-                "Whether to set dropout or not."
-            )
+            "help": "auto: fp16 AMP over fp32 weights for phi-2/Llama-2, bf16 weights + bf16 AMP "
+            "otherwise (the paper recipe); fp32: no mixed precision; explicit: keep the "
+            "fp16/bf16/torch_dtype flags as given.",
+            "choices": ["auto", "fp32", "explicit"],
         },
     )
+    lora: bool = field(default=True, metadata={"help": "Whether to use LoRA."})
+    lora_r: int = field(default=128, metadata={"help": "LoRA rank."})
+    lora_alpha: float = field(default=512, metadata={"help": "LoRA alpha."})
+    lora_dropout: float = field(default=0.05, metadata={"help": "LoRA dropout."})
+    lora_target_modules: list[str] = field(
+        default_factory=list, metadata={"help": "LoRA target modules (inferred if empty)."}
+    )
+    enable_dropout: bool = field(default=True, metadata={"help": "Keep the model's dropout."})
 
 
 def add_padding_to_tokenizer(tokenizer):
-    """ add the padding tokens in the tokenizer """
+    """Add a padding token to the tokenizer if it has none."""
     if tokenizer.pad_token is None:
         tokenizer.add_special_tokens({"pad_token": "<pad>"})

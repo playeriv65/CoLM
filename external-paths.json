@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "doc": [
+    "External paths a working checkout needs and git cannot restore.",
+    "Every entry is a gitignored symlink into shared storage. A fresh clone or a new",
+    "worktree starts without them; scripts/link-external.sh recreates them (idempotent:",
+    "it never replaces an existing link or deletes a real directory).",
+    "`target` is relative to $COLM_ARTIFACT_ROOT (default: default_artifact_root below)."
+  ],
+  "artifact_root_env": "COLM_ARTIFACT_ROOT",
+  "default_artifact_root": "/mnt/data2/zelin4593",
+  "entries": [
+    {
+      "path": "data",
+      "target": "datasets/colm",
+      "create_target": false,
+      "required": true,
+      "reason": "MathInstruct / SuperGLUE jsonl files read by configs/*.json (train_files: data/*.jsonl).",
+      "fix": "Download https://drive.google.com/file/d/1kpYMJ0xrn0eLyv-uwhUZCTjFWT6Zlb-Q into $COLM_ARTIFACT_ROOT/datasets/colm (uvx gdown <id>) and unpack it there."
+    },
+    {
+      "path": "out",
+      "target": "artifacts/CoLM/out",
+      "create_target": true,
+      "required": true,
+      "reason": "Checkpoints and adapters written by colm.train.train (output_root=out); too large for the local NVMe."
+    }
+  ]
+}

@@ -16,12 +16,7 @@ CKPTS=(
     768
     1024
 )  # Replace with your actual checkpoint numbers
-DEVICES=(
-    0
-    1
-    2
-    3
-)   # GPU devices to use
+IFS=',' read -r -a DEVICES <<< "${COLM_GPUS:?Set COLM_GPUS to the reserved GPU ids, e.g. COLM_GPUS=2,3}"  # GPU devices to use
 
 # Function to run evaluation for a single checkpoint
 run_checkpoint() {
@@ -41,7 +36,7 @@ run_checkpoint() {
     for dataset in 'gsm8k' 'math' 'numglue'
     do
         mkdir -p ${model_path}/${dataset}
-        eval_command="python run_open.py \
+        eval_command="uv run --frozen python -u run_open.py \
             --model $model_path \
             --shots 0 \
             --stem_flan_type "pot_prompt" \
@@ -52,7 +47,6 @@ run_checkpoint() {
             --use_vllm \
             --dtype $dtype \
             --enable_lora \
-            --cache_dir /data/hf_models \
             --print"
         echo "GPU $device - Checkpoint $ckpt - Dataset $dataset: $eval_command"
         CUDA_VISIBLE_DEVICES=$device $eval_command 2>&1 | tee ${model_path}/${dataset}/eval.log
@@ -62,7 +56,7 @@ run_checkpoint() {
     for dataset in 'svamp' 'deepmind' 'simuleq'
     do
         mkdir -p ${model_path}/${dataset}
-        eval_command="python run_open.py \
+        eval_command="uv run --frozen python -u run_open.py \
             --model $model_path \
             --shots 0 \
             --stem_flan_type "pot_prompt" \
@@ -73,7 +67,6 @@ run_checkpoint() {
             --use_vllm \
             --dtype $dtype \
             --enable_lora \
-            --cache_dir /data/hf_models \
             --print"
         echo "GPU $device - Checkpoint $ckpt - Dataset $dataset: $eval_command"
         CUDA_VISIBLE_DEVICES=$device $eval_command 2>&1 | tee ${model_path}/${dataset}/eval.log
@@ -91,7 +84,11 @@ echo "GPUs: ${DEVICES[*]}"
 
 # Run checkpoints in parallel
 for i in "${!CKPTS[@]}"; do
-    run_checkpoint "${CKPTS[$i]}" "${DEVICES[$i]}" "$BASE_MODEL_PATH" &
+    run_checkpoint "${CKPTS[$i]}" "${DEVICES[$((i % ${#DEVICES[@]}))]}" "$BASE_MODEL_PATH" &
+    # One checkpoint per GPU at a time.
+    if (( (i + 1) % ${#DEVICES[@]} == 0 )); then
+        wait
+    fi
 done
 
 # Wait for all background processes to complete

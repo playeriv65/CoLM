@@ -1,7 +1,8 @@
 #!/bin/bash
 
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
-DEVICE=0
+IFS=',' read -r -a DEVICES <<< "${COLM_GPUS:?Set COLM_GPUS to the reserved GPU ids, e.g. COLM_GPUS=2,3}"
+DEVICE=${DEVICES[0]}
 ORG_NAME=microsoft # meta-llama, microsoft, stabilityai
 MODEL_NAME=phi-2 # Meta-Llama-3.1-8B-Instruct, phi-2, Phi-3-mini-4k-instruct, stablelm-zephyr-3b
 model_path=${ORG_NAME}/${MODEL_NAME}
@@ -16,7 +17,7 @@ fi
 for dataset in 'gsm8k' 'math' 'numglue'
 do
     mkdir -p "${out_path}/${dataset}"
-    eval_command="python run_open.py \
+    eval_command="uv run --frozen python -u run_open.py \
         --model $model_path \
         --shots 0 \
         --stem_flan_type "pot_prompt" \
@@ -26,7 +27,6 @@ do
         --cot_backup \
         --use_vllm \
         --dtype $dtype \
-        --cache_dir /data/hf_models \
         --print"
     echo $eval_command
     CUDA_VISIBLE_DEVICES=$DEVICE $eval_command 2>&1 | tee "${out_path}/${dataset}/eval.log"
@@ -34,7 +34,7 @@ done
 for dataset in 'svamp' 'deepmind' 'simuleq'
 do
     mkdir -p "${out_path}/${dataset}"
-    eval_command="python run_open.py \
+    eval_command="uv run --frozen python -u run_open.py \
         --model $model_path \
         --shots 0 \
         --stem_flan_type "pot_prompt" \
@@ -44,7 +44,6 @@ do
         --cot_backup \
         --print \
         --dtype $dtype \
-        --cache_dir /data/hf_models \
         --use_vllm"
     echo $eval_command
     CUDA_VISIBLE_DEVICES=$DEVICE $eval_command 2>&1 | tee "${out_path}/${dataset}/eval.log"

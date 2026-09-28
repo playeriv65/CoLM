@@ -1,23 +1,22 @@
-import os
-import json
 import contextlib
+import json
 import logging
-import time
 import signal
+import time
 from collections.abc import Mapping
-from typing import Any, Dict, List, NewType, Optional, Union
+from dataclasses import asdict, dataclass, is_dataclass
+from typing import Any, NewType
 
 import numpy as np
 import torch
-from torch.nn import CrossEntropyLoss
 import torch.nn.functional as F
 import transformers
-from transformers.modeling_outputs import CausalLMOutputWithPast
-from transformers.utils import PaddingStrategy
+from torch.nn import CrossEntropyLoss
 from transformers import PreTrainedTokenizerBase
 from transformers.data.data_collator import DataCollatorMixin
-from transformers.tokenization_utils_base import PreTrainedTokenizerBase
-from dataclasses import dataclass, is_dataclass, asdict
+from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.utils import PaddingStrategy
+
 InputDataClass = NewType("InputDataClass", Any)
 
 
@@ -25,130 +24,130 @@ logger = logging.getLogger(__name__)
 
 
 PROMPT_TEMPLATE = [
-{
-    "prompt_input": (
-        "Below is an instruction that describes a task, paired with an input that provides further context. "
-        "Write a response that appropriately completes the request.\n\n"
-        "### Instruction:\n{instruction}\n\n### Input:\n{input}\n\n### Response:"
-    ),
-    "prompt_no_input": (
-        "Below is an instruction that describes a task. "
-        "Write a response that appropriately completes the request.\n\n"
-        "### Instruction:\n{instruction}\n\n### Response:"
-    ),
-},
-{
-    "prompt_input": (
-        "You are supposed to follow an instruction, and then the input to generate proper response.\n\n"
-        "### Instruction:\n{instruction}\n\n### Input:\n{input}\n\n### Response:"
-    ),
-    "prompt_no_input": (
-        "You are supposed to follow an instruction to generate proper response."
-        "### Instruction:\n{instruction}\n\n### Response:"
-    ),
-},
-{
-    "prompt_input": (
-        "Please follow the instruction and input to give a response.\n\n"
-        "### Instruction:\n{instruction}\n\n### Input:\n{input}\n\n### Response:"
-    ),
-    "prompt_no_input": (
-        "Please follow the instruction to give a response."
-        "### Instruction:\n{instruction}\n\n### Response:"
-    ),
-},
-{
-    "prompt_input": (
-        "You are an expert, please listen to human instruction and input to generate the response.\n\n"
-        "### Instruction:\n{instruction}\n\n### Input:\n{input}\n\n### Response:"
-    ),
-    "prompt_no_input": (
-        "You are an expert, please listen to human instruction to generate the response.\n\n"
-        "### Instruction:\n{instruction}\n\n### Response:"
-    ),
-},
-{
-    "prompt_input": (
-        "Let's follow the instruction to respond to an input.\n\n"
-        "### Instruction:\n{instruction}\n\n### Input:\n{input}\n\n### Response:"
-    ),
-    "prompt_no_input": (
-        "Let's follow the instruction to generate a response.\n\n"
-        "### Instruction:\n{instruction}\n\n### Response:"
-    ),
-},
-{
-    "prompt_input": (
-        "The instruction is a description of the task. You need to follow that and respond to the paired input.\n\n"
-        "### Instruction:\n{instruction}\n\n### Input:\n{input}\n\n### Response:"
-    ),
-    "prompt_no_input": (
-        "The instruction is a description of the task. You need to follow that and respond.\n\n"
-        "### Instruction:\n{instruction}\n\n### Response:"
-    ),
-},
-{
-    "prompt_input": (
-        "Below is an instruction that describes a task, paired with an input that provides further context. "
-        "Write a response that appropriately completes the request.\n\n"
-        "Instruction:\n{instruction}\n\nInput:\n{input}\n\nResponse:"
-    ),
-    "prompt_no_input": (
-        "Below is an instruction that describes a task. "
-        "Write a response that appropriately completes the request.\n\n"
-        "Instruction:\n{instruction}\n\nResponse:"
-    ),
-},
-{
-    "prompt_input": (
-        "You are supposed to follow an instruction, and then the input to generate proper response.\n\n"
-        "#Instruction:\n{instruction}\n\nInput:\n{input}\n\nResponse:"
-    ),
-    "prompt_no_input": (
-        "You are supposed to follow an instruction to generate proper response."
-        "Instruction:\n{instruction}\n\nResponse:"
-    ),
-},
-{
-    "prompt_input": (
-        "Please follow the instruction and input to give a response.\n\n"
-        "Instruction:\n{instruction}\n\nInput:\n{input}\n\nResponse:"
-    ),
-    "prompt_no_input": (
-        "Please follow the instruction to give a response."
-        "Instruction:\n{instruction}\n\nResponse:"
-    ),
-},
-{
-    "prompt_input": (
-        "You are an expert, please listen to human instruction and input to generate the response.\n\n"
-        "Instruction:\n{instruction}\n\nInput:\n{input}\n\nResponse:"
-    ),
-    "prompt_no_input": (
-        "You are an expert, please listen to human instruction to generate the response.\n\n"
-        "Instruction:\n{instruction}\n\nResponse:"
-    ),
-},
-{
-    "prompt_input": (
-        "Let's follow the instruction to respond to an input.\n\n"
-        "Instruction:\n{instruction}\n\nInput:\n{input}\n\nResponse:"
-    ),
-    "prompt_no_input": (
-        "Let's follow the instruction to generate a response.\n\n"
-        "Instruction:\n{instruction}\n\nResponse:"
-    ),
-},
-{
-    "prompt_input": (
-        "The instruction is a description of the task. You need to follow that and respond to the paired input.\n\n"
-        "Instruction:\n{instruction}\n\nInput:\n{input}\n\nResponse:"
-    ),
-    "prompt_no_input": (
-        "The instruction is a description of the task. You need to follow that and respond.\n\n"
-        "Instruction:\n{instruction}\n\nResponse:"
-    ),
-},
+    {
+        "prompt_input": (
+            "Below is an instruction that describes a task, paired with an input that provides further context. "
+            "Write a response that appropriately completes the request.\n\n"
+            "### Instruction:\n{instruction}\n\n### Input:\n{input}\n\n### Response:"
+        ),
+        "prompt_no_input": (
+            "Below is an instruction that describes a task. "
+            "Write a response that appropriately completes the request.\n\n"
+            "### Instruction:\n{instruction}\n\n### Response:"
+        ),
+    },
+    {
+        "prompt_input": (
+            "You are supposed to follow an instruction, and then the input to generate proper response.\n\n"
+            "### Instruction:\n{instruction}\n\n### Input:\n{input}\n\n### Response:"
+        ),
+        "prompt_no_input": (
+            "You are supposed to follow an instruction to generate proper response."
+            "### Instruction:\n{instruction}\n\n### Response:"
+        ),
+    },
+    {
+        "prompt_input": (
+            "Please follow the instruction and input to give a response.\n\n"
+            "### Instruction:\n{instruction}\n\n### Input:\n{input}\n\n### Response:"
+        ),
+        "prompt_no_input": (
+            "Please follow the instruction to give a response."
+            "### Instruction:\n{instruction}\n\n### Response:"
+        ),
+    },
+    {
+        "prompt_input": (
+            "You are an expert, please listen to human instruction and input to generate the response.\n\n"
+            "### Instruction:\n{instruction}\n\n### Input:\n{input}\n\n### Response:"
+        ),
+        "prompt_no_input": (
+            "You are an expert, please listen to human instruction to generate the response.\n\n"
+            "### Instruction:\n{instruction}\n\n### Response:"
+        ),
+    },
+    {
+        "prompt_input": (
+            "Let's follow the instruction to respond to an input.\n\n"
+            "### Instruction:\n{instruction}\n\n### Input:\n{input}\n\n### Response:"
+        ),
+        "prompt_no_input": (
+            "Let's follow the instruction to generate a response.\n\n"
+            "### Instruction:\n{instruction}\n\n### Response:"
+        ),
+    },
+    {
+        "prompt_input": (
+            "The instruction is a description of the task. You need to follow that and respond to the paired input.\n\n"
+            "### Instruction:\n{instruction}\n\n### Input:\n{input}\n\n### Response:"
+        ),
+        "prompt_no_input": (
+            "The instruction is a description of the task. You need to follow that and respond.\n\n"
+            "### Instruction:\n{instruction}\n\n### Response:"
+        ),
+    },
+    {
+        "prompt_input": (
+            "Below is an instruction that describes a task, paired with an input that provides further context. "
+            "Write a response that appropriately completes the request.\n\n"
+            "Instruction:\n{instruction}\n\nInput:\n{input}\n\nResponse:"
+        ),
+        "prompt_no_input": (
+            "Below is an instruction that describes a task. "
+            "Write a response that appropriately completes the request.\n\n"
+            "Instruction:\n{instruction}\n\nResponse:"
+        ),
+    },
+    {
+        "prompt_input": (
+            "You are supposed to follow an instruction, and then the input to generate proper response.\n\n"
+            "#Instruction:\n{instruction}\n\nInput:\n{input}\n\nResponse:"
+        ),
+        "prompt_no_input": (
+            "You are supposed to follow an instruction to generate proper response."
+            "Instruction:\n{instruction}\n\nResponse:"
+        ),
+    },
+    {
+        "prompt_input": (
+            "Please follow the instruction and input to give a response.\n\n"
+            "Instruction:\n{instruction}\n\nInput:\n{input}\n\nResponse:"
+        ),
+        "prompt_no_input": (
+            "Please follow the instruction to give a response."
+            "Instruction:\n{instruction}\n\nResponse:"
+        ),
+    },
+    {
+        "prompt_input": (
+            "You are an expert, please listen to human instruction and input to generate the response.\n\n"
+            "Instruction:\n{instruction}\n\nInput:\n{input}\n\nResponse:"
+        ),
+        "prompt_no_input": (
+            "You are an expert, please listen to human instruction to generate the response.\n\n"
+            "Instruction:\n{instruction}\n\nResponse:"
+        ),
+    },
+    {
+        "prompt_input": (
+            "Let's follow the instruction to respond to an input.\n\n"
+            "Instruction:\n{instruction}\n\nInput:\n{input}\n\nResponse:"
+        ),
+        "prompt_no_input": (
+            "Let's follow the instruction to generate a response.\n\n"
+            "Instruction:\n{instruction}\n\nResponse:"
+        ),
+    },
+    {
+        "prompt_input": (
+            "The instruction is a description of the task. You need to follow that and respond to the paired input.\n\n"
+            "Instruction:\n{instruction}\n\nInput:\n{input}\n\nResponse:"
+        ),
+        "prompt_no_input": (
+            "The instruction is a description of the task. You need to follow that and respond.\n\n"
+            "Instruction:\n{instruction}\n\nResponse:"
+        ),
+    },
 ]
 
 PROMPT_TEMPLATE_SINGLE = {
@@ -165,7 +164,16 @@ PROMPT_TEMPLATE_SINGLE = {
 }
 
 
-def forward_wrap_with_option_len(self, input_ids=None, labels=None, option_len=None, num_options=None, return_dict=None, output_hidden_states=False, **kwargs):
+def forward_wrap_with_option_len(
+    self,
+    input_ids=None,
+    labels=None,
+    option_len=None,
+    num_options=None,
+    return_dict=None,
+    output_hidden_states=False,
+    **kwargs,
+):
     """
     This is to replace the original forward function of Transformer models to enable:
     (1) Partial target sequence: loss will only be calculated on part of the sequence
@@ -173,15 +181,14 @@ def forward_wrap_with_option_len(self, input_ids=None, labels=None, option_len=N
     Input:
     - input_ids, labels: same as the original forward function
     - option_len: a list of int indicating the option lengths, and loss will be calculated only on the
-      last option_len tokens 
+      last option_len tokens
     - num_options: a list of int indicating the number of options for each example (this will be #label
       words for classification tasks and #choices for multiple choice tasks), and a classification loss
       will be calculated.
     """
     outputs = self.original_forward(
-        input_ids=input_ids, 
-        output_hidden_states=output_hidden_states, 
-        **kwargs)
+        input_ids=input_ids, output_hidden_states=output_hidden_states, **kwargs
+    )
     if labels is None:
         return outputs
     logits = outputs.logits
@@ -199,14 +206,18 @@ def forward_wrap_with_option_len(self, input_ids=None, labels=None, option_len=N
 
     # Calculate the loss
     loss_fct = CrossEntropyLoss(ignore_index=-100)
-    if num_options is not None: 
+    if num_options is not None:
         # Train as a classification tasks
         log_probs = F.log_softmax(shift_logits, dim=-1)
-        mask = shift_labels != -100 # Option part
-        shift_labels[~mask] = 0 # So that it doesn't mess up with indexing
+        mask = shift_labels != -100  # Option part
+        shift_labels[~mask] = 0  # So that it doesn't mess up with indexing
 
-        selected_log_probs = torch.gather(log_probs, dim=-1, index=shift_labels.unsqueeze(-1)).squeeze(-1) # (bsz x num_options, len)
-        selected_log_probs = (selected_log_probs * mask).sum(-1) / mask.sum(-1) # (bsz x num_options)
+        selected_log_probs = torch.gather(
+            log_probs, dim=-1, index=shift_labels.unsqueeze(-1)
+        ).squeeze(-1)  # (bsz x num_options, len)
+        selected_log_probs = (selected_log_probs * mask).sum(-1) / mask.sum(
+            -1
+        )  # (bsz x num_options)
 
         if any([x != num_options[0] for x in num_options]):
             # Multi choice tasks with different number of options
@@ -215,16 +226,18 @@ def forward_wrap_with_option_len(self, input_ids=None, labels=None, option_len=N
             count = 0
             while start_id < len(num_options):
                 end_id = start_id + num_options[start_id]
-                _logits = selected_log_probs[start_id:end_id].unsqueeze(0) # (1, num_options)
-                _labels = labels[start_id:end_id][0].unsqueeze(0) # (1)
+                _logits = selected_log_probs[start_id:end_id].unsqueeze(0)  # (1, num_options)
+                _labels = labels[start_id:end_id][0].unsqueeze(0)  # (1)
                 loss = loss_fct(_logits, _labels) + loss
                 count += 1
                 start_id = end_id
             loss = loss / count
         else:
             num_options = num_options[0]
-            selected_log_probs = selected_log_probs.view(-1, num_options) # (bsz, num_options)
-            labels = labels.view(-1, num_options)[:, 0] # Labels repeat so we only take the first one
+            selected_log_probs = selected_log_probs.view(-1, num_options)  # (bsz, num_options)
+            labels = labels.view(-1, num_options)[
+                :, 0
+            ]  # Labels repeat so we only take the first one
             loss = loss_fct(selected_log_probs, labels)
     else:
         loss = loss_fct(shift_logits.view(-1, self.config.vocab_size), shift_labels.view(-1))
@@ -242,10 +255,22 @@ def forward_wrap_with_option_len(self, input_ids=None, labels=None, option_len=N
     )
 
 
-def encode_prompt(task, template, train_samples, eval_sample, tokenizer, max_length, sfc=False, icl_sfc=False, generation=False, generation_with_gold=False, max_new_tokens=None):
+def encode_prompt(
+    task,
+    template,
+    train_samples,
+    eval_sample,
+    tokenizer,
+    max_length,
+    sfc=False,
+    icl_sfc=False,
+    generation=False,
+    generation_with_gold=False,
+    max_new_tokens=None,
+):
     """
     Encode prompts for eval_sample
-    Input: 
+    Input:
     - task, template: task and template class
     - train_samples, eval_sample: demonstrations and the actual sample
     - tokenizer, max_length: tokenizer and max length
@@ -253,7 +278,7 @@ def encode_prompt(task, template, train_samples, eval_sample, tokenizer, max_len
     - icl_sfc: generate prompts for ICL version calibration
     - generation: whether it is an generation task
     - generation_with_gold: whether to include the generation-task gold answers (for training)
-    - max_new_tokens: max number of new tokens to generate so that we can save enough space 
+    - max_new_tokens: max number of new tokens to generate so that we can save enough space
       (only for generation tasks)
     Output:
     - encodings: a list of N lists of tokens. N is the number of options for classification/multiple-choice.
@@ -261,41 +286,61 @@ def encode_prompt(task, template, train_samples, eval_sample, tokenizer, max_len
     """
 
     # Demonstrations for ICL
-    train_prompts = [template.verbalize(sample, sample.correct_candidate).strip() for sample in train_samples]
+    train_prompts = [
+        template.verbalize(sample, sample.correct_candidate).strip() for sample in train_samples
+    ]
     train_prompts = task.train_sep.join(train_prompts).strip()
-    
+
     # sfc or icl_sfc indicates that this example is used for calibration
     if sfc or icl_sfc:
-        encode_fn = template.encode_sfc; verbalize_fn = template.verbalize_sfc
-    else: 
-        encode_fn = template.encode; verbalize_fn = template.verbalize 
-            
-    unverbalized_eval_prompt = encode_fn(eval_sample).strip(' ')
+        encode_fn = template.encode_sfc
+        verbalize_fn = template.verbalize_sfc
+    else:
+        encode_fn = template.encode
+        verbalize_fn = template.verbalize
+
+    unverbalized_eval_prompt = encode_fn(eval_sample).strip(" ")
     if not generation:
         # We generate one prompt for each candidate (different classes in classification)
         # or different choices in multiple-choice tasks
-        verbalized_eval_prompts = [verbalize_fn(eval_sample, cand).strip(' ') for cand in eval_sample.candidates]
+        verbalized_eval_prompts = [
+            verbalize_fn(eval_sample, cand).strip(" ") for cand in eval_sample.candidates
+        ]
         unverbalized_eval_prompt_length = len(tokenizer.encode(unverbalized_eval_prompt))
-        option_lens = [(len(tokenizer.encode(verbalized_eval_prompt)) - unverbalized_eval_prompt_length) for verbalized_eval_prompt in verbalized_eval_prompts]
+        option_lens = [
+            (len(tokenizer.encode(verbalized_eval_prompt)) - unverbalized_eval_prompt_length)
+            for verbalized_eval_prompt in verbalized_eval_prompts
+        ]
 
         if sfc:
             # Without demonstrations
-            final_prompts = verbalized_eval_prompts 
+            final_prompts = verbalized_eval_prompts
         else:
             # With demonstrations
-            final_prompts = [(train_prompts + task.train_sep + eval_prompt).lstrip().strip(' ') for eval_prompt in verbalized_eval_prompts] 
+            final_prompts = [
+                (train_prompts + task.train_sep + eval_prompt).lstrip().strip(" ")
+                for eval_prompt in verbalized_eval_prompts
+            ]
     else:
         assert not sfc and not icl_sfc, "Generation tasks do not support SFC"
         if generation_with_gold:
             verbalized_eval_prompts = [verbalize_fn(eval_sample, eval_sample.correct_candidate)]
             unverbalized_eval_prompt_length = len(tokenizer.encode(unverbalized_eval_prompt))
-            option_lens = [(len(tokenizer.encode(verbalized_eval_prompt)) - unverbalized_eval_prompt_length) for verbalized_eval_prompt in verbalized_eval_prompts]
-            final_prompts = [(train_prompts + task.train_sep + eval_prompt).lstrip().strip(' ') for eval_prompt in verbalized_eval_prompts] 
+            option_lens = [
+                (len(tokenizer.encode(verbalized_eval_prompt)) - unverbalized_eval_prompt_length)
+                for verbalized_eval_prompt in verbalized_eval_prompts
+            ]
+            final_prompts = [
+                (train_prompts + task.train_sep + eval_prompt).lstrip().strip(" ")
+                for eval_prompt in verbalized_eval_prompts
+            ]
         else:
             option_lens = [0]
-            final_prompts = [(train_prompts + task.train_sep + unverbalized_eval_prompt).lstrip().strip(' ')]
+            final_prompts = [
+                (train_prompts + task.train_sep + unverbalized_eval_prompt).lstrip().strip(" ")
+            ]
 
-    # Tokenize 
+    # Tokenize
     encodings = [tokenizer.encode(final_prompt) for final_prompt in final_prompts]
 
     # Truncate (left truncate as demonstrations are less important)
@@ -304,13 +349,12 @@ def encode_prompt(task, template, train_samples, eval_sample, tokenizer, max_len
 
     if any([len(encoding) > max_length for encoding in encodings]):
         logger.warn("Exceed max length")
-    if hasattr(tokenizer, 'add_bos_token') and tokenizer.add_bos_token:
-        encodings = [encoding[0:1] + encoding[1:][-(max_length-1):] for encoding in encodings]  
+    if hasattr(tokenizer, "add_bos_token") and tokenizer.add_bos_token:
+        encodings = [encoding[0:1] + encoding[1:][-(max_length - 1) :] for encoding in encodings]
     else:
-        encodings = [encoding[-max_length:] for encoding in encodings]  
-   
+        encodings = [encoding[-max_length:] for encoding in encodings]
+
     return encodings, option_lens
- 
 
 
 @dataclass
@@ -318,25 +362,37 @@ class ICLCollator:
     """
     Collator for ICL
     """
+
     tokenizer: PreTrainedTokenizerBase
 
-    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def __call__(self, features: list[dict[str, Any]]) -> dict[str, Any]:
         if not isinstance(features[0], Mapping):
             features = [vars(f) for f in features]
         first = features[0]
         batch = {}
-        
+
         pad_id = self.tokenizer.pad_token_id
 
-        pad_ids = {"input_ids": pad_id, "attention_mask": 0, "sfc_input_ids": pad_id, "sfc_attention_mask": 0, "labels": pad_id}
+        pad_ids = {
+            "input_ids": pad_id,
+            "attention_mask": 0,
+            "sfc_input_ids": pad_id,
+            "sfc_attention_mask": 0,
+            "labels": pad_id,
+        }
         for key in first:
             pp = pad_ids[key]
             lens = [len(f[key]) for f in features]
             max_len = max(lens)
-            feature = np.stack([np.pad(f[key], (0, max_len - lens[i]), "constant", constant_values=(0, pp)) for i, f in enumerate(features)])
+            feature = np.stack(
+                [
+                    np.pad(f[key], (0, max_len - lens[i]), "constant", constant_values=(0, pp))
+                    for i, f in enumerate(features)
+                ]
+            )
             padded_feature = torch.from_numpy(feature).long()
             batch[key] = padded_feature
-            
+
         return batch
 
 
@@ -347,12 +403,12 @@ class DataCollatorWithPaddingAndNesting:
     """
 
     tokenizer: PreTrainedTokenizerBase
-    padding: Union[bool, str, PaddingStrategy] = True
-    max_length: Optional[int] = None
-    pad_to_multiple_of: Optional[int] = None
+    padding: bool | str | PaddingStrategy = True
+    max_length: int | None = None
+    pad_to_multiple_of: int | None = None
     return_tensors: str = "pt"
 
-    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def __call__(self, features: list[dict[str, Any]]) -> dict[str, Any]:
         features = [ff for f in features for ff in f]
         batch = self.tokenizer.pad(
             features,
@@ -375,10 +431,11 @@ class NondiffCollator(DataCollatorMixin):
     """
     Collator for non-differentiable objectives
     """
+
     tokenizer: PreTrainedTokenizerBase
-    padding: Union[bool, str, PaddingStrategy] = True
-    max_length: Optional[int] = None
-    pad_to_multiple_of: Optional[int] = None
+    padding: bool | str | PaddingStrategy = True
+    max_length: int | None = None
+    pad_to_multiple_of: int | None = None
     label_pad_token_id: int = -100
     return_tensors: str = "pt"
 
@@ -386,9 +443,16 @@ class NondiffCollator(DataCollatorMixin):
         import torch
 
         label_name = "label" if "label" in features[0].keys() else "labels"
-        labels = [feature[label_name] for feature in features] if label_name in features[0].keys() else None
+        labels = (
+            [feature[label_name] for feature in features]
+            if label_name in features[0].keys()
+            else None
+        )
 
-        no_labels_features = [{k: v for k, v in feature.items() if k != label_name and k != "gold"} for feature in features]
+        no_labels_features = [
+            {k: v for k, v in feature.items() if k != label_name and k != "gold"}
+            for feature in features
+        ]
 
         batch = self.tokenizer.pad(
             no_labels_features,
@@ -411,19 +475,21 @@ class NondiffCollator(DataCollatorMixin):
 
         if padding_side == "right":
             batch[label_name] = [
-                to_list(label) + [self.label_pad_token_id] * (sequence_length - len(label)) for label in labels
+                to_list(label) + [self.label_pad_token_id] * (sequence_length - len(label))
+                for label in labels
             ]
         else:
             batch[label_name] = [
-                [self.label_pad_token_id] * (sequence_length - len(label)) + to_list(label) for label in labels
+                [self.label_pad_token_id] * (sequence_length - len(label)) + to_list(label)
+                for label in labels
             ]
 
         batch[label_name] = torch.tensor(batch[label_name], dtype=torch.int64)
         if "gold" in features[0]:
             batch["gold"] = [feature["gold"] for feature in features]
-        
+
         return batch
-        
+
 
 class SIGUSR1Callback(transformers.TrainerCallback):
     """
@@ -454,13 +520,13 @@ class SIGUSR1Callback(transformers.TrainerCallback):
 
 @dataclass
 class Prediction:
-    correct_candidate: Union[int, str]
-    predicted_candidate: Union[int, str]
+    correct_candidate: int | str
+    predicted_candidate: int | str
 
 
 @contextlib.contextmanager
 def count_time(name):
-    logger.info("%s..." % name)
+    logger.info(f"{name}...")
     start_time = time.time()
     try:
         yield

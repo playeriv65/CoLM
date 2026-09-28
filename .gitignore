@@ -5,7 +5,6 @@ __pycache__/
 
 # C extensions
 *.so
-submodlib/
 # Distribution / packaging
 .Python
 build/
@@ -25,7 +24,6 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
-evaluation/vllm
 # PyInstaller
 #  Usually these files are written by a python script from a template
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
@@ -159,18 +157,15 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-# Project data
-data/
-out
-wandb
+# Project data and outputs (symlinks created by scripts/link-external.sh;
+# no trailing slash so the symlinks themselves are ignored)
+/data
+/out
+/output
+/logs
+wandb/
 math_eval/outputs/
-vllm
-submodlib
-output/*
 test.ipynb
 # Downloaded models
 hf_models/
 math_eval/hf_models/
-
-# Logs
-logs/
