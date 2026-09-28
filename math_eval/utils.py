@@ -23,6 +23,9 @@ def format_code(code_str: str):
     return code
 
 
+FORK_LOCK = threading.Lock()
+
+
 class CodeExecutor:
     def __init__(self, code, timeout, use_process: bool):
         self.code = format_code(code)
@@ -41,6 +44,14 @@ class CodeExecutor:
         except Exception:
             pass
 
+    def _child(self, connection):
+        """Run the program in a forked process and send back its stdout (nothing on failure)."""
+        result = {}
+        self.execute_code(result)
+        if "result" in result:
+            connection.send(result["result"])
+        connection.close()
+
     @staticmethod
     def execute_code_with_string(code, index, return_val):
         code = format_code(code)
@@ -57,12 +68,23 @@ class CodeExecutor:
 
     def run(self):
         if self.use_process:
-            manager = multiprocessing.Manager()
-            return_dict = manager.dict()
-            process = multiprocessing.Process(target=self.execute_code, args=(return_dict,))
-            process.start()
-            process.join(timeout=self.timeout)
-            process.terminate()
+            # Pipe creation, fork and closing our copy of the write end all happen under one lock, so
+            # no other thread's child inherits a write end and delays this program's EOF.
+            with FORK_LOCK:
+                receiver, sender = multiprocessing.Pipe(duplex=False)
+                process = multiprocessing.Process(target=self._child, args=(sender,))
+                process.start()
+                sender.close()
+            try:
+                if receiver.poll(self.timeout):
+                    return receiver.recv()
+            except EOFError:  # the program failed (or was killed) before printing anything
+                pass
+            finally:
+                receiver.close()
+                process.kill()  # SIGKILL: an inherited SIGTERM handler must not keep it alive
+                process.join()
+            return ""
         else:
             return_dict = {}
             thread = threading.Thread(target=self.execute_code, args=(return_dict,))

@@ -169,6 +169,21 @@ def test_evaluate_dataset_writes_metrics_and_skips_finished(run_open, tmp_path):
     assert len(generator.calls) == calls  # finished output is not recomputed
 
 
+def test_parallel_execution_matches_serial_and_keeps_order(run_open):
+    programs = [f"def solution():\n    return {i}\nprint(solution())" for i in range(12)]
+    programs[5] = "while True:\n    pass\nprint(1)"  # hits the 5 s timeout -> empty answer
+    programs[7] += "\n### Instruction: ignored tail"
+    serial = [run_open.extract_answer("gsm8k", p) for p in programs[:5] + programs[6:]]
+    args = eval_args(run_open, exec_workers=6)
+    args.dataset_name = "gsm8k"
+    generator = StubGenerator()
+    generator.generate = lambda *a: programs
+    got = run_open.run_question_answer(args, generator, "m", ["q"] * 12, [0] * 12)
+    assert [g[2] for g in got][:5] == [s[1] for s in serial[:5]]
+    assert [g[2] for g in got][6:] == [s[1] for s in serial[5:]]
+    assert got[5][2] == "" and "ignored tail" not in got[7][1]
+
+
 def test_output_dir_overrides_the_default_location(run_open, tmp_path):
     args = eval_args(run_open, output_dir=str(tmp_path / "base" / "outputs"))
     path = Path(run_open.output_path(args, "microsoft/phi-2", "simuleq"))

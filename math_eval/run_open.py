@@ -14,6 +14,7 @@ import argparse
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
 import torch
@@ -69,6 +70,12 @@ def build_parser():
         "--cache_dir", default=None, type=str, help="HF cache override (default: $HF_HOME)"
     )
     parser.add_argument("--gpu_memory_utilization", default=0.9, type=float)
+    parser.add_argument(
+        "--exec_workers",
+        default=16,
+        type=int,
+        help="Threads that run the generated programs concurrently (each in its own process).",
+    )
     parser.add_argument(
         "--output_dir",
         default=None,
@@ -220,6 +227,15 @@ class HfGenerator:
 # ---------------------------------------------------------------------------
 # Evaluation
 # ---------------------------------------------------------------------------
+def extract_answer(dataset: str, output: str) -> tuple[str, str]:
+    """(kept output, answer) of one generation: run its program if it has one (5 s timeout)."""
+    if "print(" in output:
+        output = output.split("### Instruction")[0]
+        tmp = "The answer is" + " " + utils.execute_with_timeout(output)
+        return output, utils.answer_clean(dataset, ("####", "The answer is"), tmp)
+    return output, utils.answer_clean(dataset, ("####", "The answer is"), output)
+
+
 def run_question_answer(
     args, generator, model_path, questions, groundtruths, collect_rerun: bool = False
 ):
@@ -230,15 +246,11 @@ def run_question_answer(
     returned_value = []
     rerun_questions = []
     rerun_groundtruths = []
-    for output, question, groundtruth in zip(outputs, questions, groundtruths, strict=True):
-        if "print(" in output:
-            output = output.split("### Instruction")[0]
-            tmp = utils.execute_with_timeout(output)
-            tmp = "The answer is" + " " + tmp
-            answer = utils.answer_clean(args.dataset_name, ("####", "The answer is"), tmp)
-        else:
-            answer = utils.answer_clean(args.dataset_name, ("####", "The answer is"), output)
-
+    with ThreadPoolExecutor(max_workers=max(1, args.exec_workers)) as pool:
+        extracted = list(pool.map(lambda o: extract_answer(args.dataset_name, o), outputs))
+    for (output, answer), question, groundtruth in zip(
+        extracted, questions, groundtruths, strict=True
+    ):
         if answer == "" and collect_rerun:
             rerun_questions.append(utils.remove_flan_tag(question, args.stem_flan_type))
             rerun_groundtruths.append(groundtruth)
