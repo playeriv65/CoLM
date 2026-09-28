@@ -57,7 +57,8 @@ def test_queue_order_and_contents(repo):
         "013-train-r8-a512.json",
         "014-evalloss-r8-a512.json",
         "015-evalacc-r8-a512.json",
-        "016-summary.json",
+        "016-evalacc-base.json",
+        "017-summary.json",
     ]
     jobs = {p.name: json.loads(p.read_text()) for p in JobQueue(root).jobs("pending")}
     train = jobs["004-train-r16-a64.json"]
@@ -74,7 +75,15 @@ def test_queue_order_and_contents(repo):
     acc = jobs["003-evalacc-r128-a512.json"]
     assert "--use_vllm" in acc["argv"] and "--enable_lora" in acc["argv"]
     assert acc["argv"].count("out/rank-sweep/phi-2-r128-a512-1024steps-seed0/checkpoint-512") == 1
-    assert jobs["016-summary.json"]["gpu"] is False
+    assert jobs["017-summary.json"]["gpu"] is False
+    assert acc["argv"][acc["argv"].index("--gpu_memory_utilization") + 1] == "0.3"
+    base_acc = jobs["016-evalacc-base.json"]
+    assert "--enable_lora" not in base_acc["argv"] and "--use_vllm" in base_acc["argv"]
+    assert base_acc["argv"][base_acc["argv"].index("--model") + 1] == "microsoft/phi-2"
+    assert "--output_dir" in base_acc["argv"] and "requires" not in base_acc
+    for flag in ("--shots", "--stem_flan_type", "--dtype", "--model_max_length", "--dataset"):
+        i, j = acc["argv"].index(flag), base_acc["argv"].index(flag)
+        assert acc["argv"][i : i + 2] == base_acc["argv"][j : j + 2]
     meta = JobQueue(root).read_meta()
     assert meta["forbidden_cache_prefixes"] == ["/mnt/net"] and "HF_HOME" in meta["require_env"]
     with pytest.raises(SystemExit, match="already has jobs"):
@@ -93,7 +102,7 @@ def test_generated_queue_dry_runs_through_the_worker(repo, capsys):
     root = create_queue(SWEEP, "queues/sweep", (), repo)
     assert worker.main(["--queue", str(root), "--gpu", "0", "--dry-run"]) == 0
     out = capsys.readouterr().out
-    assert out.count("CUDA_VISIBLE_DEVICES=0") == 16 and "17 pending jobs" in out
+    assert out.count("CUDA_VISIBLE_DEVICES=0") == 17 and "18 pending jobs" in out
     assert (
         "colm.train.train out/rank-sweep/phi-2-r128-a512-1024steps-seed0/train_config.json" in out
     )
@@ -131,7 +140,14 @@ def test_summary_of_fake_results(repo):
     spec, base = load_spec(SWEEP, repo)
     for i, arm in enumerate(spec["arms"][:2]):
         _fake_arm(repo, spec, base, arm, scale=1.0 + i)
+    base_outputs = repo / spec["eval"]["base_output_dir"]
+    base_outputs.mkdir(parents=True)
+    for d in spec["eval"]["datasets"]:
+        (base_outputs / f"{d}_x.metrics.json").write_text(
+            json.dumps({"dataset": d, "accuracy": 0.25})
+        )
     result = summarize.summarize(SWEEP, repo)
+    assert result["base_accuracy"]["gsm8k"] == 0.25 and result["notes"]
     first, second, third = result["arms"][:3]
     assert first["trainable_params"] == 128 * 10 + 5 * 128
     assert second["trainable_params"] == 16 * 10 + 5 * 16
@@ -143,5 +159,6 @@ def test_summary_of_fake_results(repo):
     assert third["trainable_params"] is None and third["step_time_mean_s"] is None
     markdown = summarize.to_markdown(result, spec["eval"]["checkpoints"])
     assert "r128-a512" in markdown and "## Eval loss: heldout" in markdown
+    assert "| base (no LoRA) | - | 0.2500" in markdown and "contaminated" in markdown
     summarize.main(["--sweep", SWEEP], repo)
     assert (repo / spec["output_root"] / "summary.md").exists()

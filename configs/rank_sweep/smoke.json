@@ -18,6 +18,8 @@
         "stem_flan_type": "pot_prompt",
         "model_max_length": 2048,
         "batch_size": 8,
+        "gpu_memory_utilization": 0.3,
+        "base_output_dir": "out/rank-sweep-smoke/phi-2-base/outputs",
         "limit": 20
     },
     "env": {

@@ -169,6 +169,15 @@ def test_evaluate_dataset_writes_metrics_and_skips_finished(run_open, tmp_path):
     assert len(generator.calls) == calls  # finished output is not recomputed
 
 
+def test_output_dir_overrides_the_default_location(run_open, tmp_path):
+    args = eval_args(run_open, output_dir=str(tmp_path / "base" / "outputs"))
+    path = Path(run_open.output_path(args, "microsoft/phi-2", "simuleq"))
+    assert path.parent == tmp_path / "base" / "outputs" and path.parent.is_dir()
+    args.model = ["a", "b"]
+    with pytest.raises(SystemExit, match="output_dir"):
+        run_open.validate_models(args)
+
+
 def test_partial_output_is_recomputed(run_open, tmp_path):
     model = tmp_path / "ckpt"
     args = eval_args(run_open, limit=3)

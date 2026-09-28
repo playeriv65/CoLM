@@ -100,10 +100,10 @@ def checkpoint_losses(directory: Path) -> dict:
     }
 
 
-def accuracies(directory: Path, checkpoint: int) -> dict:
+def accuracies(outputs_dir: Path) -> dict:
+    """{dataset: accuracy} from the ``*.metrics.json`` files of one outputs directory."""
     found = {}
-    pattern = str(directory / f"checkpoint-{checkpoint}" / "outputs" / "*.metrics.json")
-    for path in glob.glob(pattern):
+    for path in glob.glob(str(outputs_dir / "*.metrics.json")):
         metrics = json.loads(Path(path).read_text())
         found[metrics["dataset"]] = metrics["accuracy"]
     return found
@@ -127,11 +127,16 @@ def summarize(sweep_path, repo: Path = REPO) -> dict:
             else None
         ),
         "datasets": datasets,
+        "base_accuracy": accuracies(repo / spec["eval"]["base_output_dir"]),
+        "notes": spec.get("summary_notes", []),
         "arms": [],
     }
     for arm in spec["arms"]:
         directory = repo / arm_dir(spec, arm, base)
-        accs = {c: accuracies(directory, c) for c in spec["eval"]["checkpoints"]}
+        accs = {
+            c: accuracies(directory / f"checkpoint-{c}" / "outputs")
+            for c in spec["eval"]["checkpoints"]
+        }
         summary["arms"].append(
             {
                 "arm": arm_label(arm),
@@ -163,7 +168,9 @@ def _fmt(value, spec="{:.4f}"):
 
 
 def to_markdown(summary: dict, checkpoints: list[int]) -> str:
-    lines = [
+    lines = [f"> {note}" for note in summary.get("notes", [])]
+    lines += [
+        "",
         "## Training cost",
         "",
         "| arm | r | alpha | trainable params | step time mean / median (s) | train peak mem (GB) | final train loss (last 64) |",
@@ -196,6 +203,15 @@ def to_markdown(summary: dict, checkpoints: list[int]) -> str:
         "| arm | checkpoint | " + " | ".join(summary["datasets"]) + " | mean |",
         "|---|---|" + "---|" * (len(summary["datasets"]) + 1),
     ]
+    base_acc = summary.get("base_accuracy") or {}
+    if base_acc:
+        mean = statistics.fmean(base_acc[d] for d in summary["datasets"] if d in base_acc)
+        complete = all(d in base_acc for d in summary["datasets"])
+        lines.append(
+            "| base (no LoRA) | - | "
+            + " | ".join(_fmt(base_acc.get(d)) for d in summary["datasets"])
+            + f" | {_fmt(mean if complete else None)} |"
+        )
     for a in summary["arms"]:
         for c in checkpoints:
             acc = a["accuracy"].get(c, {})

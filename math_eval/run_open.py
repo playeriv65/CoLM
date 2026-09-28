@@ -70,6 +70,12 @@ def build_parser():
     )
     parser.add_argument("--gpu_memory_utilization", default=0.9, type=float)
     parser.add_argument(
+        "--output_dir",
+        default=None,
+        type=str,
+        help="Directory for the outputs of a single hub-id model (default: <repo>/out/<name>).",
+    )
+    parser.add_argument(
         "--max_lora_rank",
         default=None,
         type=int,
@@ -96,6 +102,8 @@ def validate_models(args):
     """Fail fast on argument combinations that would silently evaluate the wrong thing."""
     if not args.model:
         raise SystemExit("--model is required")
+    if args.output_dir and len(args.model) > 1:
+        raise SystemExit("--output_dir needs exactly one --model")
     adapters = [is_adapter(m) for m in args.model]
     if any(adapters) and not all(adapters):
         raise SystemExit("--model mixes LoRA checkpoints and full models")
@@ -260,7 +268,9 @@ def output_path(args, model_path: str, dataset: str) -> str:
     if args.cot_backup:
         filename += "_CoTBackup"
     filename += f"_bs{args.batch_size}_{suffix}_import"
-    if os.path.exists(model_path):
+    if args.output_dir:
+        out_dir = args.output_dir
+    elif os.path.exists(model_path):
         out_dir = os.path.join(model_path, "outputs")
     else:
         out_dir = os.path.join(REPO_OUT, model_path.split("/")[-1], "outputs")

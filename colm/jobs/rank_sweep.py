@@ -4,8 +4,9 @@
 
 Queue order: a cheap base-model eval-loss job (fails fast if the eval-loss path is broken),
 then per arm its train job, eval-loss job (standalone, on the saved checkpoints) and accuracy
-job (vLLM), and finally a CPU-only summary job. The per-arm training config is written to
-``<output_root>/<arm>/train_config.json`` (self-contained provenance of the run).
+job (vLLM), the base model's accuracy job, and finally a CPU-only summary job. The per-arm
+training config is written to ``<output_root>/<arm>/train_config.json`` (self-contained
+provenance of the run).
 """
 
 import argparse
@@ -57,6 +58,57 @@ def _git_commit(repo: Path) -> str:
         ["git", "rev-parse", "--short", "HEAD"], cwd=repo, capture_output=True, text=True
     )
     return out.stdout.strip() or "unknown"
+
+
+def accuracy_argv(ev: dict, models: list[str], lora: bool, extra: list[str]) -> list[str]:
+    """`math_eval/run_open.py` command line shared by the arms' and the base model's accuracy jobs."""
+    argv = [
+        "{python}",
+        "-u",
+        "math_eval/run_open.py",
+        "--model",
+        *models,
+        "--dataset",
+        *ev["datasets"],
+        "--shots",
+        str(ev["shots"]),
+        "--stem_flan_type",
+        ev["stem_flan_type"],
+        "--batch_size",
+        str(ev["batch_size"]),
+        "--model_max_length",
+        str(ev["model_max_length"]),
+        "--cot_backup",
+        "--use_vllm",
+        "--dtype",
+        ev["dtype"],
+    ]
+    if lora:
+        argv.append("--enable_lora")
+    if ev.get("gpu_memory_utilization"):
+        argv += ["--gpu_memory_utilization", str(ev["gpu_memory_utilization"])]
+    return argv + extra
+
+
+def base_accuracy_job(spec: dict, base_config: dict) -> dict:
+    """Accuracy of the un-tuned base model, same eval settings as the arms (the reference row)."""
+    ev = spec["eval"]
+    steps, seed = base_config["max_steps"], base_config["seed"]
+    out_dir = ev["base_output_dir"]
+    limit_args = ["--limit", str(ev["limit"])] if ev.get("limit") else []
+    return {
+        "name": "evalacc-base",
+        "kind": "eval_acc",
+        "argv": accuracy_argv(
+            ev,
+            [base_config["model_name_or_path"]],
+            lora=False,
+            extra=["--output_dir", out_dir, *limit_args],
+        ),
+        "env": dict(spec["env"]),
+        "log_stem": f"{spec['name']}-evalacc-base-{steps}steps-seed{seed}",
+        "expects": [f"{out_dir}/{d}_*.metrics.json" for d in ev["datasets"]],
+    }
 
 
 def build_jobs(spec: dict, base_config: dict, sweep_arg: str) -> list[dict]:
@@ -135,29 +187,7 @@ def build_jobs(spec: dict, base_config: dict, sweep_arg: str) -> list[dict]:
                 "name": f"evalacc-{label}",
                 "kind": "eval_acc",
                 "arm": arm,
-                "argv": [
-                    "{python}",
-                    "-u",
-                    "math_eval/run_open.py",
-                    "--model",
-                    *checkpoints,
-                    "--dataset",
-                    *ev["datasets"],
-                    "--shots",
-                    str(ev["shots"]),
-                    "--stem_flan_type",
-                    ev["stem_flan_type"],
-                    "--batch_size",
-                    str(ev["batch_size"]),
-                    "--model_max_length",
-                    str(ev["model_max_length"]),
-                    "--cot_backup",
-                    "--use_vllm",
-                    "--dtype",
-                    ev["dtype"],
-                    "--enable_lora",
-                    *limit_args,
-                ],
+                "argv": accuracy_argv(ev, checkpoints, lora=True, extra=limit_args),
                 "env": env,
                 "log_stem": f"{spec['name']}-evalacc-{key}",
                 "requires": adapter_files,
@@ -166,6 +196,7 @@ def build_jobs(spec: dict, base_config: dict, sweep_arg: str) -> list[dict]:
                 ],
             }
         )
+    jobs.append(base_accuracy_job(spec, base_config))
     jobs.append(
         {
             "name": "summary",
