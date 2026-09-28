@@ -76,7 +76,7 @@ def test_queue_order_and_contents(repo):
     assert "--use_vllm" in acc["argv"] and "--enable_lora" in acc["argv"]
     assert acc["argv"].count("out/rank-sweep/phi-2-r128-a512-1024steps-seed0/checkpoint-512") == 1
     assert jobs["017-summary.json"]["gpu"] is False
-    assert acc["argv"][acc["argv"].index("--gpu_memory_utilization") + 1] == "0.3"
+    assert acc["argv"][acc["argv"].index("--gpu_memory_utilization") + 1] == "0.9"
     base_acc = jobs["016-evalacc-base.json"]
     assert "--enable_lora" not in base_acc["argv"] and "--use_vllm" in base_acc["argv"]
     assert base_acc["argv"][base_acc["argv"].index("--model") + 1] == "microsoft/phi-2"

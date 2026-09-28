@@ -18,12 +18,12 @@
         "stem_flan_type": "pot_prompt",
         "model_max_length": 2048,
         "batch_size": 8,
-        "gpu_memory_utilization": 0.3,
+        "gpu_memory_utilization": 0.9,
         "base_output_dir": "out/rank-sweep/phi-2-base/outputs",
         "limit": null
     },
     "summary_notes": [
-        "Step time and training peak memory are secondary metrics: other jobs (evaluations of earlier arms, vLLM at 0.3 of the card) shared GPU 0 during part of each training run, so they are contaminated by concurrency. Loss and accuracy are unaffected."
+        "Evaluations run alone on the card (vLLM at 0.9). Exception: train-r128-a512 shared GPU 0 with a concurrent vLLM job (0.3) for part of its run, so its step time is contaminated; see TODO.md."
     ],
     "env": {
         "HF_HUB_OFFLINE": "1",
