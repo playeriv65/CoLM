@@ -8,7 +8,9 @@ tokens, W&B keys or machine-private data.
 
 - `uv sync` builds `.venv` (Python 3.12, torch 2.13.0+cu130 from the PyTorch cu130 index,
   transformers 5.x, peft, accelerate, submodlib from git). Extras: `--extra eval` (vLLM 0.30,
-  pinned to the same torch), `--extra wandb`. Lock file `uv.lock` is committed; upgrade with
+  pinned to the same torch), `--extra wandb`, `--extra flash` (flash-attn built from source against
+  the locked torch: `FLASH_ATTN_CUDA_ARCHS=120 MAX_JOBS=32 uv sync --extra flash`, ~5 min on
+  pro6000; Ampere+ only). Lock file `uv.lock` is committed; upgrade with
   `uv lock --upgrade` and re-run the tests.
 - The uv cache comes from `UV_CACHE_DIR` (machine env), not from pyproject.
 - HF caches must point at the local NVMe (`HF_HOME`), never at a network disk. Pass no
@@ -24,7 +26,13 @@ tokens, W&B keys or machine-private data.
   `get_batch_samples` (feature → gather on rank 0 → facility location → broadcast → micro-batches)
   and `training_step` (loss scaling). Do not copy HF loop internals back in.
 - `colm/train/custom_phi.py` — Phi forward split before the last decoder layer (5.x modeling API).
-- `colm/train/facility_location.py` — source-wise facility location (submodlib).
+- `colm/train/facility_location.py` — source-wise facility location (submodlib);
+  `features_needed` decides, from source ids only, whose MeZO feature can matter.
+- `colm/train/packing.py` — padding-free rows (restarting `position_ids`, no mask, label -100 at
+  every sequence start, varlen `cu_seq_lens`); `colm/train/attention.py` — `colm_varlen`, exact fp32
+  varlen attention registered through `AttentionInterface` (the packed selection forward).
+- `scripts/check_exact_opts.py` — teacher-forced GPU check of the optimised vs the original path
+  (selections, g_i, gradients, noise floors); `scripts/selection_trace.py` — per-step trace of a run.
 - `colm/train/step_timing.py` — opt-in per-phase step timer (`--profile_timing coarse|fine`),
   transfer/sync census, and the summariser (`python -m colm.train.step_timing <jsonl>`). At level
   `off` every timer call is a no-op; keep new timing sections behind `timer.section` / `timer.fine`.
@@ -46,9 +54,20 @@ tokens, W&B keys or machine-private data.
 - Behaviour preserved from the original implementation on purpose (do not "fix" silently):
   logged CoLM loss is divided by `small_batch_ratio`; `torch.manual_seed(zo_random_seed)` is
   re-applied on every MeZO estimate (same z every step); per-sample MeZO loss averages over the
-  padded length; base weights are fp32 with fp16 AMP for phi-2 (`torch_dtype=none`).
+  padded length (packed paths keep that divisor per example); base weights are fp32 with fp16 AMP
+  for phi-2 (`torch_dtype=none`).
+- The selection forward is fp32 by design (decision D2 open): never route it through flash
+  attention (transformers casts fp32 queries to fp16 there). Packed inputs must be run with
+  `use_cache=False` (with a `DynamicCache` transformers does not detect packing).
+- Every step optimisation stays behind a flag with the original path selectable
+  (`configs/timing_phi2_efficient_original.json`); tests compare both on CPU in float64
+  (`tests/test_exact_opts.py`) because the MeZO feature is a difference quotient that turns
+  fp32 rounding into ~1e-3 relative noise. On GPU judge exactness teacher forced against the
+  noise floors of `scripts/check_exact_opts.py` (F8, F10 in the backlog), never by comparing two
+  end-to-end runs: two runs of the same code diverge after two steps.
 
 ## Optimisation work
 
 - Backlog, findings and open decisions: `docs/optimization-backlog.md`. Read it before touching
   the selection path; update item status there when an item lands or is measured.
+- What is next / in progress / done: `TODO.md` (keep it in sync with the backlog).

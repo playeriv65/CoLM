@@ -24,12 +24,20 @@ dependencies = [
 wandb = ["wandb"]
 # Math evaluation with vLLM (stock vLLM, LoRA through LoRARequest).
 eval = ["vllm==0.30.0"]
+# flash-attn for the packed fp16 training forward (train_attn_implementation=auto picks it up).
+# No wheels for torch 2.13: built from source against the locked torch, e.g.
+#   FLASH_ATTN_CUDA_ARCHS=120 MAX_JOBS=32 uv sync --extra flash   (sm_120 only: ~5 min, 32 jobs)
+# Needs Ampere or newer (not the Turing rtx6000).
+flash = ["flash-attn>=2.8.3"]
 
 [dependency-groups]
 dev = ["ruff", "pytest"]
 
 [tool.uv]
 default-groups = ["dev"]
+
+[tool.uv.extra-build-dependencies]
+flash-attn = [{ requirement = "torch", match-runtime = true }, "ninja", "psutil"]
 
 [tool.uv.sources]
 torch = [{ index = "pytorch-cu130" }]

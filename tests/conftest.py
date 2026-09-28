@@ -13,6 +13,16 @@ from tokenizers import Regex, Tokenizer, models, pre_tokenizers
 from transformers import PhiConfig, PhiForCausalLM, PreTrainedTokenizerFast
 
 SPECIAL_TOKENS = ["<unk>", "</s>", "<pad>"]
+# TrainingArguments that select the original (pre-optimisation) code paths.
+ORIGINAL_PATH = dict(
+    lazy_mode_switch=False,
+    cache_flops=False,
+    skip_unused_features=False,
+    zo_label_positions_only=False,
+    zo_packing=False,
+    train_packing="none",
+    train_attn_implementation="model",
+)
 NUM_LAYERS = 2
 NUM_SOURCES = 4
 

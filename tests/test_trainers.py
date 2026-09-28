@@ -5,7 +5,7 @@ import sys
 
 import pytest
 import torch
-from conftest import NUM_LAYERS, add_lora, make_phi
+from conftest import NUM_LAYERS, ORIGINAL_PATH, add_lora, make_phi
 
 from colm.data.get_training_dataset import (
     DataCollatorForSupervisedDatasetWithSource,
@@ -88,7 +88,8 @@ def _lora_snapshot(model):
     return {n: p.detach().clone() for n, p in model.named_parameters() if "lora_" in n}
 
 
-def test_efficient_trainer_selects_and_trains(tmp_path, tokenizer, mixture_file, monkeypatch):
+@pytest.mark.parametrize("path", ["original", "exact_opts"])
+def test_efficient_trainer_selects_and_trains(tmp_path, tokenizer, mixture_file, monkeypatch, path):
     wandb_loaded_before = "wandb" in sys.modules
     bs, gas, ratio = 4, 2, 0.5
     args = _args(
@@ -98,6 +99,7 @@ def test_efficient_trainer_selects_and_trains(tmp_path, tokenizer, mixture_file,
         small_batch_ratio=ratio,
         efficient_mezo=True,
         keep_sources="0",
+        **(ORIGINAL_PATH if path == "original" else {}),
     )
     trainer, model = _build(SubsetTrainerEfficient, args, tokenizer, mixture_file)
     calls, selections = _record(trainer, monkeypatch)
@@ -113,25 +115,42 @@ def test_efficient_trainer_selects_and_trains(tmp_path, tokenizer, mixture_file,
     new_bs = int(bs * ratio)
     for step in range(MAX_STEPS):
         step_calls = [c for c in calls if c[0] == step]
-        # gas micro-batches of bs*ratio selected examples per optimizer step
-        assert [c[1] for c in step_calls] == [new_bs] * gas
+        if path == "original":
+            # gas micro-batches of bs*ratio selected examples per optimizer step
+            assert [c[1] for c in step_calls] == [new_bs] * gas
+        else:
+            # train_packing=merged: placeholders first, then packed rows (one example row each)
+            sizes = [c[1] for c in step_calls]
+            num_rows = sum(sizes)
+            assert len(sizes) == gas and 1 <= num_rows <= gas
+            assert sizes == [0] * (gas - num_rows) + [1] * num_rows
+            assert sum(len(c[2]["indices"]) for c in step_calls if c[1]) == gas * new_bs
     assert len(selections) == MAX_STEPS
-    for n_large, idx, _, examples in selections:
+    for step, (n_large, idx, _, examples) in enumerate(selections):
         assert n_large == bs * gas
         assert len(idx) == len(set(idx)) == gas * new_bs
         # Every example of a kept source is trained on.
         kept = [i for i, ex in enumerate(examples) if ex["sources"][0] in args.keep_sources]
         assert set(kept) <= set(idx)
+        trained = [i for c in calls if c[0] == step and c[1] for i in c[2]["indices"]]
+        assert trained == [examples[i]["indices"][0] for i in idx]
 
-    # Trained micro-batches are re-collated selected examples, padded with the pad id.
     for _, _, inputs in calls:
-        pad = inputs["attention_mask"] == 0
-        assert (inputs["input_ids"][pad] == tokenizer.pad_token_id).all()
-        assert (inputs["labels"][pad] == -100).all()
+        if path == "original":
+            # Re-collated selected examples, padded with the pad id.
+            pad = inputs["attention_mask"] == 0
+            assert (inputs["input_ids"][pad] == tokenizer.pad_token_id).all()
+            assert (inputs["labels"][pad] == -100).all()
+        elif inputs:
+            # Packed: no padding, positions restart at every example.
+            assert "attention_mask" not in inputs
+            assert int((inputs["position_ids"][0] == 0).sum()) == len(inputs["indices"])
 
     after = _lora_snapshot(model)
     assert any(not torch.equal(before[n], after[n]) for n in before)
     assert torch.isfinite(last_b).all()
+    # The per-phase attention switch hands the model back with its own implementation.
+    assert trainer._attn_config._attn_implementation == "sdpa"
     if not wandb_loaded_before:
         assert "wandb" not in sys.modules
 

@@ -24,10 +24,12 @@ from collections import Counter
 import numpy as np
 import torch
 import torch.distributed as dist
-from transformers import Trainer
+from transformers import Trainer, TrainerCallback
+from transformers.utils import is_flash_attn_2_available
 
+from colm.train import attention, packing
 from colm.train.custom_phi import DecomposedPhiCausalLM
-from colm.train.facility_location import get_orders_and_weights
+from colm.train.facility_location import features_needed, get_orders_and_weights
 from colm.train.step_timing import StepTimer, StepTimingCallback
 from colm.train.utils import collate_fn
 
@@ -35,6 +37,8 @@ logger = logging.getLogger(__name__)
 
 # Key under which the regular SubsetTrainer attaches the per-example loss weight.
 SAMPLE_WEIGHT_KEY = "colm_sample_weight"
+# Marks a packed training micro-batch (colm.train.packing) with its own loss.
+PACKED_KEY = "colm_packed"
 INDICES_DIRNAME = "indices"
 
 
@@ -91,10 +95,33 @@ def _token_counts(timer: StepTimer, prefix: str, batch: dict) -> None:
     timer.count(f"{prefix}_label_tokens", int((batch["labels"] != -100).sum()))
 
 
+def _train_token_counts(timer: StepTimer, batch: dict) -> None:
+    """`_token_counts` of a training micro-batch, padded or packed (placeholders: nothing)."""
+    if not batch:
+        return
+    if not batch.get(PACKED_KEY):
+        _token_counts(timer, "train", batch)
+        return
+    timer.count("train_samples", int((batch["position_ids"][0] == 0).sum()))
+    timer.count("train_tokens_padded", batch["input_ids"].numel())
+    timer.count("train_tokens_real", batch["num_real_tokens"])
+    timer.count("train_label_tokens", len(batch["targets"]))
+
+
 def _split_examples(inputs: dict) -> list[dict]:
     """Slice a collated batch into single-example batches (tensors keep dim 0)."""
     batch_size = len(inputs["input_ids"])
     return [{k: v[i : i + 1] for k, v in inputs.items()} for i in range(batch_size)]
+
+
+class _RestoreAttention(TrainerCallback):
+    """Set the model's attention implementation back at the end of every optimizer step."""
+
+    def __init__(self, trainer, name: str):
+        self.trainer, self.name = trainer, name
+
+    def on_step_end(self, args, state, control, **kwargs):
+        self.trainer._set_attention(self.name)
 
 
 class _CoLMTrainerBase(Trainer):
@@ -114,6 +141,7 @@ class _CoLMTrainerBase(Trainer):
         else:
             self.dtype = torch.float32
         self._micro_step = 0
+        self._flops_per_token = None
         self._select_seconds = 0.0
         self._last_log = None  # (time, global_step) of the previous loss log
         # Opt-in per-phase step timing; a no-op (no synchronize) at level 'off'.
@@ -175,7 +203,15 @@ class _CoLMTrainerBase(Trainer):
 
     def floating_point_ops(self, inputs):
         with self._timer.section("hf_floating_point_ops"):
-            return super().floating_point_ops(inputs)
+            if not self.args.cache_flops:
+                return super().floating_point_ops(inputs)
+            # HF's formula; num_parameters() walks every parameter, so count them once.
+            main_input = getattr(self.model, "main_input_name", "input_ids")
+            if main_input not in inputs or not hasattr(self.model, "num_parameters"):
+                return 0
+            if self._flops_per_token is None:
+                self._flops_per_token = 6 * self.model.num_parameters(exclude_embeddings=True)
+            return inputs[main_input].numel() * self._flops_per_token
 
     def _track_num_input_tokens(self, inputs):
         with self._timer.section("hf_track_input_tokens"):
@@ -237,6 +273,9 @@ class SubsetTrainer(_CoLMTrainerBase):
         self.prev_m_t = None
         self.prev_v_t = None
         self._num_train_microbatches = 1
+        # Attention implementation per phase (None: never switched); see _eval_mode.
+        self._attn_config = self.model.config
+        self._train_attn = self._zo_attn = None
         # Same seed on every rank: np is seeded by set_seed before the trainer is built.
         self.zo_random_seed = np.random.randint(1000000000)
         self.named_parameters_to_optim = []
@@ -294,17 +333,19 @@ class SubsetTrainer(_CoLMTrainerBase):
             # Placeholder that keeps the HF loop's accumulation count aligned.
             return torch.zeros((), device=self.args.device)
         weight = inputs.pop(SAMPLE_WEIGHT_KEY, None)
+        packed = inputs.pop(PACKED_KEY, False)
         with t.fine("model_train"):
-            model.train()
-            if hasattr(self.optimizer, "train") and callable(self.optimizer.train):
-                self.optimizer.train()
+            self._train_mode(model)
         with t.section("prepare_inputs"):
             if t.enabled:
                 t.count("train_h2d_bytes", _nbytes(inputs))
             inputs = self._prepare_inputs(inputs)
         with t.section("forward"):
             with self.compute_loss_context_manager():
-                loss = self.compute_loss(model, inputs)
+                if packed:
+                    loss = self._packed_loss(model, inputs)
+                else:
+                    loss = self.compute_loss(model, inputs)
         if weight is not None:
             loss = loss * weight
         if self.args.n_gpu > 1:
@@ -315,6 +356,47 @@ class SubsetTrainer(_CoLMTrainerBase):
         # CoLM logs the loss divided by small_batch_ratio (kept from the original
         # implementation so train/loss curves stay comparable).
         return loss.detach() / self.args.small_batch_ratio
+
+    @staticmethod
+    def _packed_loss(model, inputs):
+        """Loss of a packed training micro-batch (`_train_microbatches`).
+
+        Logits are computed only at the positions that predict a label (`logits_to_keep`).
+        A row holding several sub-batches returns the sum of their token means (sum of the
+        token losses of each sub-batch / its label count): exactly what the padded
+        sub-batches return one by one.
+        """
+        outputs = model(
+            input_ids=inputs["input_ids"],
+            position_ids=inputs["position_ids"],
+            use_cache=False,
+            logits_to_keep=inputs["logit_positions"],
+            **inputs["attention_kwargs"],
+        )
+        token_losses = torch.nn.functional.cross_entropy(
+            outputs.logits[0].float(), inputs["targets"], reduction="none"
+        )
+        sums = token_losses.new_zeros(len(inputs["sub_batch_labels"]))
+        sums.index_add_(0, inputs["target_sub_batch"], token_losses)
+        return (sums / inputs["sub_batch_labels"]).sum()
+
+    # ----- train / eval mode and attention per phase -------------------------
+    def _set_attention(self, name: str | None) -> None:
+        if name is not None and self._attn_config._attn_implementation != name:
+            self._attn_config._attn_implementation = name
+
+    def _train_mode(self, model) -> None:
+        # The unwrapped model's flag is authoritative (a DDP wrapper keeps its own).
+        if not self.args.lazy_mode_switch or not self.model.training:
+            model.train()
+        self._set_attention(self._train_attn)
+        if hasattr(self.optimizer, "train") and callable(self.optimizer.train):
+            self.optimizer.train()
+
+    def _eval_mode(self) -> None:
+        if not self.args.lazy_mode_switch or self.model.training:
+            self.model.eval()
+        self._set_attention(self._zo_attn)
 
     # ----- selection --------------------------------------------------------
     def get_batch_samples(self, epoch_iterator, num_batches, device):
@@ -739,7 +821,7 @@ class SubsetTrainer(_CoLMTrainerBase):
 
     def zo_forward(self, inputs):
         """Loss without gradient and without dropout."""
-        self.model.eval()
+        self._eval_mode()
         with torch.inference_mode():
             prepared = self._prepare_inputs(dict(inputs))
             with self.compute_loss_context_manager():
@@ -769,6 +851,43 @@ class SubsetTrainerEfficient(SubsetTrainer):
         )
         self.decomposer = DecomposedPhiCausalLM(base_model, timer=self._timer)
         self.pad_token_id = self.processing_class.pad_token_id
+        args = self.args
+        self._zo_new_path = (
+            args.skip_unused_features or args.zo_packing or args.zo_label_positions_only
+        )
+        self._resolve_attention(base_model)
+
+    def _resolve_attention(self, base_model) -> None:
+        """Attention implementation of the selection and of the training forward.
+
+        The model config is shared by every layer, so the implementation is switched with the
+        train/eval mode at each phase boundary (`_train_mode` / `_eval_mode`).
+        """
+        args = self.args
+        self._attn_config = base_model.config
+        original = self._attn_config._attn_implementation
+        self._zo_attn = original
+        if args.zo_packing and args.zo_attn_implementation == attention.NAME:
+            self._zo_attn = attention.register()
+        choice = args.train_attn_implementation
+        if choice == "auto":
+            capable = torch.cuda.is_available() and torch.cuda.get_device_capability() >= (8, 0)
+            choice = "flash_attention_2" if capable and is_flash_attn_2_available() else "model"
+        self._train_attn = original if choice == "model" else choice
+        if self._train_attn != original:
+            # Validates availability (raises if flash-attn is missing), then restores.
+            base_model.set_attn_implementation(self._train_attn)
+            base_model.set_attn_implementation(original)
+        if self._zo_attn == self._train_attn == original:
+            self._zo_attn = self._train_attn = None  # never switched
+        else:
+            # Outside selection / training (callbacks such as the eval loss, saving) the model
+            # has its own attention again; runs before callbacks added after the trainer.
+            self.add_callback(_RestoreAttention(self, original))
+        logger.info(
+            f"Attention: model {original}, selection {self._zo_attn or original}, "
+            f"training {self._train_attn or original}"
+        )
 
     def _check_args(self):
         args = self.args
@@ -795,38 +914,287 @@ class SubsetTrainerEfficient(SubsetTrainer):
 
     def _select_microbatches(self, batch_samples: list[dict]) -> list[dict]:
         t = self._timer
-        reps = []
-        for inputs in batch_samples:
+        if self._zo_new_path:
+            with t.section("examples_to_cpu"):
+                with t.fine("to_cpu"):
+                    cpu_batches = [_to_cpu(inputs) for inputs in batch_samples]
+                with t.fine("split"):
+                    examples = [ex for inputs in cpu_batches for ex in _split_examples(inputs)]
+            num_per_rank = self._num_select_per_rank(len(batch_samples))
             with t.section("features"):
-                reps.append(self.save_select(inputs))
-        with t.section("reps_cat"):
-            reps = torch.cat(reps, dim=0).float()
+                reps = self.zo_features(cpu_batches, num_per_rank)
+        else:
+            reps = []
+            for inputs in batch_samples:
+                with t.section("features"):
+                    reps.append(self.save_select(inputs))
+            with t.section("reps_cat"):
+                reps = torch.cat(reps, dim=0).float()
         with t.section("reps_d2h"):
             t.count("sel_reps_d2h_bytes", reps.nbytes)
             reps = reps.cpu()
-        with t.section("examples_to_cpu"):
-            with t.fine("to_cpu"):
-                cpu_batches = [_to_cpu(inputs) for inputs in batch_samples]
-            with t.fine("split"):
-                examples = [ex for inputs in cpu_batches for ex in _split_examples(inputs)]
+        if not self._zo_new_path:
+            with t.section("examples_to_cpu"):
+                with t.fine("to_cpu"):
+                    cpu_batches = [_to_cpu(inputs) for inputs in batch_samples]
+                with t.fine("split"):
+                    examples = [ex for inputs in cpu_batches for ex in _split_examples(inputs)]
+            num_per_rank = self._num_select_per_rank(len(batch_samples))
         if t.enabled:
             with t.section("token_stats"):
                 for batch in cpu_batches:
                     _token_counts(t, "sel", batch)
                     t.count("sel_examples_d2h_bytes", _nbytes(batch))
-        num_per_rank = self._num_select_per_rank(len(batch_samples))
         selected_examples, _ = self._select_across_ranks(reps, examples, num_per_rank)
         with t.section("recollate"):
-            microbatches = [
-                collate_fn(selected_examples[i : i + self.new_bs], self.pad_token_id)
-                for i in range(0, len(selected_examples), self.new_bs)
-            ]
+            microbatches = self._train_microbatches(selected_examples, len(batch_samples))
         if t.enabled:
             with t.section("token_stats"):
                 for batch in microbatches:
-                    _token_counts(t, "train", batch)
-        self._num_train_microbatches = len(microbatches)
+                    _train_token_counts(t, batch)
         return microbatches
+
+    # ----- training micro-batches ---------------------------------------------
+    def _train_microbatches(self, selected_examples: list[dict], num_batches: int) -> list[dict]:
+        """The HF loop's `num_batches` micro-batches: selected sub-batches of `new_bs`.
+
+        `train_packing=none` re-collates every sub-batch with padding (the original);
+        `sub_batch` packs each sub-batch into one row; `merged` packs whole sub-batches into
+        as few forwards as `train_pack_max_tokens` allows, preceded by empty placeholders so
+        the HF loop still counts `num_batches` (and syncs DDP on the last one).
+        """
+        sub_batches = [
+            selected_examples[i : i + self.new_bs]
+            for i in range(0, len(selected_examples), self.new_bs)
+        ]
+        self._num_train_microbatches = len(sub_batches)
+        mode = self.args.train_packing
+        if mode == "none":
+            return [collate_fn(sub, self.pad_token_id) for sub in sub_batches]
+        if mode == "sub_batch":
+            groups = [[i] for i in range(len(sub_batches))]
+        else:
+            sizes = [
+                sum(packing.real_length(ex["attention_mask"][0]) for ex in sub)
+                for sub in sub_batches
+            ]
+            groups = packing.rows_by_token_budget(sizes, self.args.train_pack_max_tokens)
+        packed = [self._pack_sub_batches([sub_batches[i] for i in g]) for g in groups]
+        placeholders = [{} for _ in range(num_batches - len(packed))]
+        return placeholders + packed
+
+    def _pack_sub_batches(self, sub_batches: list[list[dict]]) -> dict:
+        """One packed row of whole sub-batches, with the sub-batch of every target."""
+        sequences, sub_batch_of, num_labels, indices = [], [], [], []
+        for b, sub in enumerate(sub_batches):
+            indices += [ex["indices"][0] for ex in sub]
+            seqs = [packing.unpad(ex, 0) for ex in sub]
+            # 0 labels gives 0 / 0 = NaN, the token mean of such a padded sub-batch too.
+            num_labels.append(sum(int((lab[1:] != packing.IGNORE_INDEX).sum()) for _, lab in seqs))
+            sequences += seqs
+            sub_batch_of += [b] * len(seqs)
+        row = packing.pack(sequences, self.pad_token_id)
+        targets = packing.shift_left(row.labels)[0]
+        logit_positions = (targets != packing.IGNORE_INDEX).nonzero(as_tuple=True)[0]
+        segment = row.segment_ids[0, logit_positions]
+        return {
+            PACKED_KEY: True,
+            "input_ids": row.input_ids,
+            "position_ids": row.position_ids,
+            "labels": row.labels,
+            "logit_positions": logit_positions,
+            "targets": targets[logit_positions],
+            "target_sub_batch": torch.tensor(sub_batch_of, dtype=torch.long)[segment],
+            "sub_batch_labels": torch.tensor(num_labels, dtype=torch.float32),
+            "attention_kwargs": row.attention_kwargs("cpu"),
+            "num_real_tokens": row.num_real_tokens,
+            "indices": indices,
+        }
+
+    # ----- MeZO features, planned per step -------------------------------------
+    def zo_features(self, cpu_batches: list[dict], num_per_rank: int) -> torch.Tensor:
+        """Per-example MeZO features `g_i * z` of the large batch, shape [N, numel].
+
+        Only examples whose feature can influence the selection are forwarded
+        (`skip_unused_features`); the others get g_i = 0. Each example's loss keeps the
+        original divisor (padded length of its micro-batch - 1, F2), however it is batched.
+        """
+        t, args = self._timer, self.args
+        param = self.named_parameters_to_optim[0][1]
+        with t.section("plan"):
+            sources = [
+                int(s.item() if isinstance(s, torch.Tensor) else s)
+                for batch in cpu_batches
+                for s in batch["sources"]
+            ]
+            needed = self._features_needed(sources, num_per_rank)
+            groups = self._zo_groups(cpu_batches, needed)
+        if t.enabled:
+            t.count("sel_zo_examples", int(needed.sum()))
+            t.count("sel_zo_tokens", sum(g["input_ids"].numel() for g in groups))
+            t.count("sel_zo_logit_positions", sum(g["targets"].numel() for g in groups))
+        projected_grads = torch.zeros(len(sources), dtype=torch.float32, device=param.device)
+        for group in groups:
+            group_grads = self._zo_projected_grads(group)
+            projected_grads = projected_grads.to(group_grads.dtype)  # the loss dtype (fp32)
+            projected_grads[group["examples"]] = group_grads
+        with t.section("feature"):
+            # Also the RNG epilogue of the per-micro-batch path (seed, then one z draw): the
+            # training dropout stream starts from here even if nothing was forwarded.
+            with t.fine("z_seed"):
+                torch.manual_seed(self.zo_random_seed)
+            with t.fine("z_normal"):
+                z = torch.normal(
+                    mean=0,
+                    std=1,
+                    size=param.data.size(),
+                    device=param.data.device,
+                    dtype=param.data.dtype,
+                )
+            with t.fine("outer_product"):
+                grad_updates = projected_grads.view(-1, *([1] * param.dim())) * z.unsqueeze(0)
+            if args.mezo_selection == "weight_grad" and not torch.all(param.data == 0):
+                grad_updates = grad_updates * param.data.unsqueeze(0)
+            return grad_updates.view(len(sources), -1).float()
+
+    def _features_needed(self, sources: list[int], num_per_rank: int) -> np.ndarray:
+        args = self.args
+        if not args.skip_unused_features:
+            return np.ones(len(sources), dtype=bool)
+        per_rank = _all_gather_object(sources)
+        offset = sum(len(r) for r in per_rank[: args.process_index])
+        needed = features_needed(
+            [s for r in per_rank for s in r],
+            total=num_per_rank * args.world_size,
+            keep_sources=args.keep_sources,
+            strategy=args.source_wise_selection,
+            per_class_start=args.num_per_class_start,
+            need_selected=args.mezo_optim == "adam",
+            per_source_rng=args.mezo_topk == "sampling",
+        )
+        return needed[offset : offset + len(sources)]
+
+    def _zo_groups(self, cpu_batches: list[dict], needed: np.ndarray) -> list[dict]:
+        """Forward groups of the needed examples: one packed group, or one per micro-batch."""
+        locations, divisors = [], []
+        for b, batch in enumerate(cpu_batches):
+            batch_size, width = batch["input_ids"].shape
+            locations += [(b, r) for r in range(batch_size)]
+            divisors += [width - 1] * batch_size
+        divisors = torch.tensor(divisors, dtype=torch.float32)
+        index = np.where(needed)[0]
+        if len(index) == 0:
+            return []
+        groups = []
+        if self.args.zo_packing:
+            sequences = [packing.unpad(cpu_batches[b], r) for b, r in (locations[i] for i in index)]
+            rows = packing.rows_by_token_budget(
+                [len(ids) for ids, _ in sequences], self.args.zo_pack_max_tokens
+            )
+            row = packing.pack(sequences, self.pad_token_id, rows)
+            kwargs = row.attention_kwargs("cpu") if self._zo_attn == attention.NAME else {}
+            groups.append(
+                self._zo_group(
+                    index,
+                    row.input_ids,
+                    None,
+                    row.position_ids,
+                    row.labels,
+                    row.segment_ids,
+                    divisors,
+                    kwargs,
+                )
+            )
+        else:
+            offset = 0
+            for batch in cpu_batches:
+                batch_size = len(batch["input_ids"])
+                rows = [r for r in range(batch_size) if needed[offset + r]]
+                if rows:
+                    sel = torch.tensor(rows)
+                    labels = batch["labels"][sel]
+                    segment = torch.arange(len(rows)).unsqueeze(1).expand_as(labels)
+                    groups.append(
+                        self._zo_group(
+                            offset + np.array(rows),
+                            batch["input_ids"][sel],
+                            batch["attention_mask"][sel],
+                            None,
+                            labels,
+                            segment,
+                            divisors,
+                            {},
+                        )
+                    )
+                offset += batch_size
+        return groups
+
+    def _zo_group(
+        self, examples, input_ids, attention_mask, position_ids, labels, segment, divisors, kwargs
+    ) -> dict:
+        """Device tensors of one forward group; segment ids index `examples`, -1 = no example."""
+        targets = packing.shift_left(labels).reshape(-1)
+        segment = segment.reshape(-1)
+        if self.args.zo_label_positions_only:
+            positions = (targets != packing.IGNORE_INDEX).nonzero(as_tuple=True)[0]
+            targets, segment = targets[positions], segment[positions]
+        else:
+            positions = None
+            targets = targets.view(labels.shape)
+            # Positions without an example (row tails) go to a dropped extra slot.
+            segment = torch.where(segment < 0, len(examples), segment)
+        group = {
+            "examples": torch.as_tensor(examples, dtype=torch.long),
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "position_ids": position_ids,
+            "targets": targets,
+            "positions": positions,
+            "segment": segment,
+            "divisor": divisors[torch.as_tensor(examples, dtype=torch.long)],
+            "attention_kwargs": kwargs,
+        }
+        return self._prepare_input(group)
+
+    def _zo_projected_grads(self, group: dict) -> torch.Tensor:
+        """(L(theta + eps z) - L(theta - eps z)) / 2 eps for the examples of one group."""
+        t = self._timer
+        with t.section("forward_till_penultimate"):
+            with t.fine("model_eval"):
+                self._eval_mode()
+            with torch.inference_mode():
+                intermediate = self.decomposer.forward_till_penultimate(
+                    input_ids=group["input_ids"],
+                    attention_mask=group["attention_mask"],
+                    position_ids=group["position_ids"],
+                    attention_kwargs=group["attention_kwargs"],
+                )
+        with t.section("perturb_plus"):
+            self.zo_perturb_parameters(scaling_factor=1)
+        with t.section("final_layer_plus"):
+            loss1 = self._zo_group_losses(group, intermediate)
+        with t.section("perturb_minus"):
+            self.zo_perturb_parameters(scaling_factor=-2)
+        with t.section("final_layer_minus"):
+            loss2 = self._zo_group_losses(group, intermediate)
+        with t.section("feature"):
+            with t.fine("projected_grad"):
+                projected_grads = (loss1 - loss2) / (2 * self.args.mezo_eps)
+        with t.section("restore"):
+            self.zo_perturb_parameters(scaling_factor=1)
+        return projected_grads
+
+    def _zo_group_losses(self, group: dict, intermediate: dict) -> torch.Tensor:
+        """Per-example loss: sum of its token losses / original divisor."""
+        num = len(group["examples"])
+        with torch.inference_mode():
+            token_losses = self.decomposer.final_layer_token_losses(
+                intermediate, group["targets"], group["positions"]
+            )
+            with self._timer.fine("per_example_sum"):
+                sums = token_losses.new_zeros(num + 1)
+                sums.index_add_(0, group["segment"], token_losses.reshape(-1))
+                return sums[:num] / group["divisor"]
 
     def save_select(self, inputs):
         """Per-example MeZO estimates of the last-layer LoRA-B gradient, shape [B, numel]."""
@@ -868,7 +1236,7 @@ class SubsetTrainerEfficient(SubsetTrainer):
     def zo_forward_till_penultimate(self, inputs):
         t = self._timer
         with t.fine("model_eval"):
-            self.model.eval()
+            self._eval_mode()
         with torch.inference_mode():
             with t.fine("prepare_inputs"):
                 prepared = self._prepare_inputs(dict(inputs))
@@ -878,7 +1246,7 @@ class SubsetTrainerEfficient(SubsetTrainer):
 
     def zo_forward_final_layer(self, labels, intermediate):
         with self._timer.fine("model_eval"):
-            self.model.eval()
+            self._eval_mode()
         with torch.inference_mode():
             loss, _ = self.decomposer.forward_final_layer(
                 intermediate, labels=labels, per_sample_loss=True

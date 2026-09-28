@@ -26,10 +26,13 @@ transformers 5.x, PEFT, accelerate; versions pinned in `uv.lock`).
 uv sync                  # training: creates .venv with colm installed in editable mode
 uv sync --extra eval     # + stock vLLM for math evaluation (LoRA through LoRARequest)
 uv sync --extra wandb    # + Weights & Biases (opt-in, see below)
-uv sync --all-extras     # everything
+uv sync --all-extras     # everything (includes the flash-attn source build below)
+FLASH_ATTN_CUDA_ARCHS=120 MAX_JOBS=32 uv sync --extra flash   # optional flash-attn (built from source, ~5 min)
 ```
-`submodlib` (facility location) is built from its git repository; `flash-attn`, `traker`, the vLLM
-fork and `bitsandbytes` are no longer needed (attention uses PyTorch SDPA).
+`submodlib` (facility location) is built from its git repository; `traker`, the vLLM fork and
+`bitsandbytes` are no longer needed. `flash-attn` is optional (no wheels for torch 2.13; set
+`FLASH_ATTN_CUDA_ARCHS` to your GPUs, Ampere or newer): with it installed the packed training
+forward uses `flash_attention_2`, otherwise PyTorch SDPA.
 
 W&B is off by default (`report_to="none"`, nothing imports `wandb`). To log a run, install the extra
 and pass `--report_to wandb` (optionally `--wandb_project/--wandb_entity/--wandb_notes`, or the
@@ -72,6 +75,32 @@ Every parent node is reported with an explicit `other` residual; the root is the
 between consecutive optimizer steps. Configs: `configs/timing_phi2_efficient.json` (fine, 130 steps,
 census on the 10 warmup steps) and `configs/timing_phi2_efficient_coarse.json` (coarse, 60 steps).
 Measured breakdown of the default config: `docs/optimization-backlog.md` ("Measured baseline").
+
+### Exact step optimisations
+The step of `SubsetTrainerEfficient` runs, by default, a faster path that keeps the selection and
+training semantics (details, exactness classes and measurements: `docs/optimization-backlog.md`).
+Every item has a flag; `configs/timing_phi2_efficient_original.json` switches all of them off
+(the original path) for A/B runs.
+
+| flag (default) | what it does |
+|---|---|
+| `skip_unused_features` (true) | no MeZO forward for examples whose feature cannot change the selection (`keep_sources`, sources with a zero budget; all of them when the kept examples fill the budget) |
+| `zo_packing` (true), `zo_pack_max_tokens` (0 = one row) | MeZO forward on packed (padding-free) examples; each keeps its original loss divisor |
+| `zo_attn_implementation` (`colm_varlen`) | exact fp32 varlen attention for the packed MeZO forward (`colm/train/attention.py`) |
+| `zo_label_positions_only` (true) | MeZO final layer: LM head and loss only where a label is predicted |
+| `train_packing` (`merged`), `train_pack_max_tokens` (1024) | training sub-batches packed into forwards of at most 1024 tokens, each sub-batch keeping its own token mean (`none`: padded sub-batches, `sub_batch`: one row each; `train_pack_max_tokens=0`: one forward per step, faster but ~2x the training peak memory) |
+| `train_attn_implementation` (`auto`) | training attention: `flash_attention_2` when flash-attn is installed, else the model's |
+| `lazy_mode_switch`, `cache_flops` (true) | train/eval mode and attention switched once per phase; HF flop count without a parameter walk per micro-batch |
+
+On the phi-2 recipe (1 GPU, `configs/timing_phi2_efficient.json`) the step goes from 2860 to
+1402 ms at the same peak memory (1257 ms with `train_pack_max_tokens=0`). The selection is the same
+computation up to fp32 rounding; the training loss is the same per-sub-batch token mean, but
+packed training draws its dropout masks on differently shaped tensors, and flash-attn replaces
+SDPA inside the same fp16 precision class.
+
+`scripts/check_exact_opts.py <config> <out.json> max_steps=20` compares the configured path with the
+original one on GPU at every step on the same weights (teacher forced); `scripts/selection_trace.py`
+records selections / losses of a whole run for comparing two checkouts.
 
 Note: We implement CoLM with an efficient last-layer zeroth-order gradient estimation that requires approximately only one forward pass of the model. While the selection time is negligible (<0.1s), CoLM still introduces additional overhead, such as synchronizing gradients before selection, broadcasting selected indices back, padding after selection (which can make some samples longer), transferring tensors between CPU and GPU, context switching, and so on. In the paper, we report the ideal training time of our method which is the forward pass time for a batch size of 128 + the forward and backward pass time for a batch size of 64.
 

@@ -85,13 +85,19 @@ def test_efficient_trainer_timing(tmp_path, tokenizer, mixture_file, level):
     assert [s["step"] for s in steps] == [1, 2, 3]
     assert [s["census"] for s in steps] == [True, False, False]
     assert any(k.startswith("census/") for k in steps[0]["counts"])
+    forwarded = 0
     for s in steps[1:]:
         sec = s["sections"]
         for name in ["data", "selection", "train", "optimizer", "optimizer/step"]:
             assert name in sec, name
-        assert "selection/features/forward_till_penultimate" in sec
-        assert ("selection/features/forward_till_penultimate/layers/00" in sec) == (level == "fine")
+        # skip_unused_features: no MeZO forward when the kept examples fill the budget.
+        if s["counts"]["sel_zo_examples"] > 0:
+            forwarded += 1
+            assert "selection/features/forward_till_penultimate" in sec
+            fine_layer = "selection/features/forward_till_penultimate/layers/00"
+            assert (fine_layer in sec) == (level == "fine")
         assert s["counts"]["sel_samples"] == 8 and s["counts"]["train_samples"] == 4
+    assert forwarded
     _closes(steps)
     summary = summarize(str(out), warmup=1, window=2)
     assert summary["num_steps_used"] == 2

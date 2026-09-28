@@ -13,6 +13,11 @@ from transformers.models.phi.modeling_phi import PhiForCausalLM
 from colm.train.step_timing import StepTimer
 
 
+def _at_least_fp32(logits: torch.Tensor) -> torch.Tensor:
+    """Upcast half-precision logits for the loss (fp32 / fp64 stay as they are)."""
+    return logits if logits.dtype in (torch.float32, torch.float64) else logits.float()
+
+
 class DecomposedPhiCausalLM:
     """Runs a `PhiForCausalLM` (possibly with LoRA layers injected) in two parts."""
 
@@ -47,15 +52,23 @@ class DecomposedPhiCausalLM:
         self,
         input_ids: torch.LongTensor,
         attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        attention_kwargs: dict | None = None,
     ) -> dict:
-        """Embeddings and every decoder layer except the last one (no KV cache)."""
+        """Embeddings and every decoder layer except the last one (no KV cache).
+
+        Packed inputs (colm.train.packing) pass restarting `position_ids`, no
+        `attention_mask` and, for varlen kernels, `attention_kwargs` (`cu_seq_lens_q`, ...).
+        """
         model, t = self.transformer, self.timer
+        attention_kwargs = attention_kwargs or {}
         with t.fine("embed"):
             inputs_embeds = model.embed_tokens(input_ids)
         with t.fine("position_ids"):
-            position_ids = torch.arange(
-                inputs_embeds.shape[1], device=inputs_embeds.device
-            ).unsqueeze(0)
+            if position_ids is None:
+                position_ids = torch.arange(
+                    inputs_embeds.shape[1], device=inputs_embeds.device
+                ).unsqueeze(0)
         with t.fine("causal_mask"):
             causal_mask = create_causal_mask(
                 config=self.config,
@@ -76,13 +89,57 @@ class DecomposedPhiCausalLM:
                         attention_mask=causal_mask,
                         position_ids=position_ids,
                         position_embeddings=position_embeddings,
+                        **attention_kwargs,
                     )
         return {
             "hidden_states": hidden_states,
             "causal_mask": causal_mask,
             "position_ids": position_ids,
             "position_embeddings": position_embeddings,
+            "attention_kwargs": attention_kwargs,
         }
+
+    def _last_layer(self, intermediate: dict) -> torch.Tensor:
+        return self.layers[-1](
+            intermediate["hidden_states"],
+            attention_mask=intermediate["causal_mask"],
+            position_ids=intermediate["position_ids"],
+            position_embeddings=intermediate["position_embeddings"],
+            **intermediate.get("attention_kwargs", {}),
+        )
+
+    def final_layer_token_losses(
+        self,
+        intermediate: dict,
+        targets: torch.LongTensor,
+        positions: torch.LongTensor | None = None,
+    ) -> torch.Tensor:
+        """Per-position cross-entropy of the last decoder layer + LM head (fp32).
+
+        Without `positions`, `targets` is `[rows, T]` (the token predicted at every position,
+        -100 = ignored, loss 0) and the result has that shape. With `positions` (flat indices
+        into `rows * T`) only those positions go through the final layer norm and the LM head;
+        `targets` and the result are aligned with `positions`.
+        """
+        t = self.timer
+        with t.fine("decoder_layer"):
+            self._time_sub_blocks = t.fine_enabled
+            try:
+                hidden_states = self._last_layer(intermediate)
+            finally:
+                self._time_sub_blocks = False
+        if positions is not None:
+            with t.fine("label_positions"):
+                hidden_states = hidden_states.reshape(-1, hidden_states.shape[-1])[positions]
+        with t.fine("final_layernorm"):
+            hidden_states = self.transformer.final_layernorm(hidden_states)
+        with t.fine("lm_head"):
+            logits = _at_least_fp32(self.lm_head(hidden_states))
+        with t.fine("cross_entropy"):
+            losses = nn.functional.cross_entropy(
+                logits.reshape(-1, logits.shape[-1]), targets.reshape(-1), reduction="none"
+            )
+        return losses.view(targets.shape)
 
     def forward_final_layer(
         self,
@@ -100,12 +157,7 @@ class DecomposedPhiCausalLM:
         with t.fine("decoder_layer"):
             self._time_sub_blocks = t.fine_enabled
             try:
-                hidden_states = self.layers[-1](
-                    intermediate["hidden_states"],
-                    attention_mask=intermediate["causal_mask"],
-                    position_ids=intermediate["position_ids"],
-                    position_embeddings=intermediate["position_embeddings"],
-                )
+                hidden_states = self._last_layer(intermediate)
             finally:
                 self._time_sub_blocks = False
         with t.fine("final_layernorm"):
@@ -113,7 +165,7 @@ class DecomposedPhiCausalLM:
         with t.fine("lm_head"):
             logits = self.lm_head(hidden_states)
         with t.fine("logits_float"):
-            logits = logits.float()
+            logits = _at_least_fp32(logits)
 
         if labels is None:
             return None, logits

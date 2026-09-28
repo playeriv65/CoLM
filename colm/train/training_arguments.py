@@ -147,6 +147,78 @@ class TrainingArguments(HFTrainingArguments):
         },
     )
 
+    # --- Exact step optimisations (docs/optimization-backlog.md; all off = original path) ---
+    lazy_mode_switch: bool = field(
+        default=True,
+        metadata={
+            "help": "Switch train/eval mode (and the attention implementation) once per phase "
+            "instead of walking all modules before every selection / training forward."
+        },
+    )
+    cache_flops: bool = field(
+        default=True,
+        metadata={
+            "help": "Count the parameters for the HF flop counter once instead of on every "
+            "micro-batch (same value)."
+        },
+    )
+    skip_unused_features: bool = field(
+        default=True,
+        metadata={
+            "help": "Skip the MeZO forward of examples whose feature cannot affect the selection "
+            "(keep_sources, zero-budget sources; O1)."
+        },
+    )
+    zo_label_positions_only: bool = field(
+        default=True,
+        metadata={"help": "MeZO final layer: LM head and loss only at label positions (O5)."},
+    )
+    zo_packing: bool = field(
+        default=True,
+        metadata={
+            "help": "Pack the examples of the MeZO forward without padding (O6). Each example "
+            "keeps its original divisor (padded length of its micro-batch - 1)."
+        },
+    )
+    zo_pack_max_tokens: int = field(
+        default=0,
+        metadata={"help": "Tokens per packed MeZO row (0: all examples in one row)."},
+    )
+    zo_attn_implementation: str = field(
+        default="colm_varlen",
+        metadata={
+            "help": "Attention of the packed (fp32) MeZO forward: colm_varlen (exact fp32 varlen, "
+            "colm/train/attention.py) or model (the model's attn_implementation, e.g. sdpa with "
+            "a dense block mask).",
+            "choices": ["colm_varlen", "model"],
+        },
+    )
+    train_packing: str = field(
+        default="merged",
+        metadata={
+            "help": "Training micro-batches: none (padded sub-batches), sub_batch (one packed row "
+            "per sub-batch), merged (sub-batches packed into as few forwards as "
+            "train_pack_max_tokens allows, each sub-batch keeping its own token mean; O6/O8).",
+            "choices": ["none", "sub_batch", "merged"],
+        },
+    )
+    train_pack_max_tokens: int = field(
+        default=1024,
+        metadata={
+            "help": "Tokens per merged training forward; whole sub-batches are packed up to this "
+            "budget. 1024 keeps the training peak memory of the padded micro-batches (26 GB on "
+            "the phi-2 recipe); 0 packs the whole step into one forward (faster, ~2x the memory)."
+        },
+    )
+    train_attn_implementation: str = field(
+        default="auto",
+        metadata={
+            "help": "Attention of the training forward: auto (flash_attention_2 if flash-attn is "
+            "installed, else the model's), model, sdpa, flash_attention_2, eager.",
+            "choices": ["auto", "model", "sdpa", "flash_attention_2", "eager"],
+        },
+    )
+
     # --- Stability ---
     assert_finite_grad_norm: bool = field(
         default=False,

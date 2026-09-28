@@ -88,6 +88,56 @@ def _per_class_budget(B, N, y, per_class_start, strategy):
     return y, classes, num_per_class
 
 
+def features_needed(
+    sources,
+    total: int,
+    keep_sources,
+    strategy: str,
+    per_class_start: str,
+    need_selected: bool,
+    per_source_rng: bool,
+) -> np.ndarray:
+    """Which examples' selection features can influence the result of one selection.
+
+    Mirrors `SubsetTrainer._select_on_main` + `get_orders_and_weights` on the gathered
+    source ids (rank-major order), before any feature is computed:
+
+    * examples of `keep_sources` are trained on unconditionally and their features dropped;
+    * if the kept examples fill the budget `total`, no feature is used at all;
+    * a source whose budget is zero contributes no facility-location candidate, and its rows
+      are masked, top-k ranked and clustered only among themselves;
+    * a source selected in full (budget == count) skips facility location, but its features
+      still enter the MeZO Adam state (`need_selected`, i.e. `mezo_optim == "adam"`).
+
+    Budgets are only known without random numbers for the `proportional` and `none`
+    strategies (`balanced` breaks ties with `np.random`). `per_source_rng` (`mezo_topk ==
+    "sampling"`) draws `np.random` per source from the features themselves, so there only
+    `keep_sources` examples are skipped.
+    """
+    sources = np.asarray([int(s) for s in sources])
+    keep = (
+        np.isin(sources, list(keep_sources)) if len(keep_sources) else np.zeros(len(sources), bool)
+    )
+    candidates = ~keep
+    budget = total - int(keep.sum())
+    if budget <= 0:
+        return np.zeros(len(sources), dtype=bool)
+    if strategy == "balanced" or per_source_rng:
+        return candidates
+    y = sources[candidates]
+    # class_of: classes 0..C-1 in sorted source order, as get_orders_and_weights numbers them.
+    class_of, classes, quotas = _per_class_budget(
+        budget, len(y), None if strategy == "none" else y, per_class_start, strategy
+    )
+    counts = np.array([int((class_of == c).sum()) for c in classes])
+    used = quotas > 0
+    if not need_selected:
+        used &= quotas < counts
+    needed = np.zeros(len(sources), dtype=bool)
+    needed[np.where(candidates)[0]] = used[class_of]
+    return needed
+
+
 def get_orders_and_weights(
     B,
     X,

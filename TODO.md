@@ -6,9 +6,6 @@ commit / result pointer, delete them once they are recorded in docs. Optimisatio
 
 ## In progress
 
-- [ ] Exact (semantics-preserving) step optimisations O1, O5, O6, O7 + host-overhead removal,
-      re-timed against the 2868 ms baseline (`docs/optimization-backlog.md`). Branch `task/exact-opts`.
-
 ## Next
 
 - [ ] Refactor to a modern, hack-free structure (scope to be agreed; see "Refactor" below).
@@ -64,8 +61,24 @@ commit / result pointer, delete them once they are recorded in docs. Optimisatio
       (a workaround for fp16 unscale errors).
 - [ ] Many selection units / trainers (`rep`, `masked_grad`, `completion_length`, …) around one paper
       method; decide which are needed for the paper's tables before pruning.
+- [ ] Attention implementation switched per phase on the shared model config (`_set_attention`,
+      restored at step end by a callback) because selection (fp32, `colm_varlen`) and training
+      (fp16, flash) need different kernels; a per-call choice would be cleaner.
+- [ ] Optimisation flags (`skip_unused_features`, `zo_packing`, `train_packing`, …) keep the original
+      paths alive for A/B; drop the original paths once signed off.
 
 ## Decisions pending (user)
+
+- Training rows: the default `train_pack_max_tokens=1024` keeps the padded path's peak memory
+  (26.3 vs 26.5 GB, 1402 ms/step); `0` (one forward per step) is 1257 ms but 53.9 GB, and CoLM's
+  claim is memory. Keep 1024 or switch (`docs/optimization-backlog.md`, "Exact optimisations").
+- fp16-AMP training gradients of phi-2 are only ~0.8 cosine-similar to fp32 (F9); upstream recipe,
+  unchanged. Decide whether that matters for the paper numbers (bf16 / fp32 attention is a
+  precision change).
+- The rank sweep started from `c397142` runs the original step path; its later jobs switch to the
+  new defaults if the main checkout is pulled before the sweep ends (the worker records the commit
+  but does not check it). Pull only after the sweep, or pin the original flags
+  (`configs/timing_phi2_efficient_original.json` lists them) in the sweep's base config.
 
 - D1–D4 in `docs/optimization-backlog.md` (F2 divisor, selection precision, dropout for activation
   reuse, 1-D facility location).
@@ -77,6 +90,13 @@ commit / result pointer, delete them once they are recorded in docs. Optimisatio
   the aborted fine timing log + jsonl and the first failed smoke log in `logs/`.
 
 ## Done
+
+- 2026-09-28 Exact step optimisations H, O1, O5, O6, O7, O8 (`COMMIT_HASH`): 2860 → 1402 ms/step
+  (2.04×) at the default (training rows ≤ 1024 tokens, peak 26.3 GB), 1257 ms (2.28×) with one
+  training forward per step (53.9 GB); selection 1870 → 810 ms, training 908 → 545 / 400 ms.
+  All behind flags (`configs/timing_phi2_efficient_original.json` = original path, re-timed at
+  2860 ms). Exactness evidence, attention findings on sm_120 and the per-item table:
+  `docs/optimization-backlog.md` ("Exact optimisations").
 
 - 2026-09-28 Port to uv + transformers 5.17 + stock vLLM (`113005a`); unported baseline env on
   branch `task/original-env` (`96673d0`); per-phase step timing (`69a9235`, baseline 2868 ms/step).
