@@ -79,14 +79,44 @@ Note: the logged training `loss` of the CoLM trainers is the mean loss divided b
 (kept from the original implementation so curves remain comparable).
 
 ## Evaluation
+Accuracy (vLLM, PoT with CoT backup) of base models and LoRA checkpoints; one process and one vLLM
+engine serve every checkpoint and dataset given:
 ```bash
-cd math_eval
-COLM_GPUS=2,3 bash eval_finetuned.sh /path/to/your/model
+CUDA_VISIBLE_DEVICES=<gpu> python -u math_eval/run_open.py --model out/run/checkpoint-512 out/run/checkpoint-1024 \
+    --dataset gsm8k math numglue svamp deepmind simuleq --shots 0 --stem_flan_type pot_prompt \
+    --model_max_length 2048 --cot_backup --use_vllm --dtype float16 --enable_lora
+# --dry_run builds the prompts of every dataset and loads no model; --limit N evaluates N examples
 ```
+Results: `<checkpoint>/outputs/<name>.jsonl` (+ `.metrics.json` with accuracy and counts); finished
+outputs are skipped on a rerun, partial ones (`.partial`) are recomputed. The legacy
+`math_eval/eval_finetuned.sh` / `eval_pretrained.sh` still work.
+
+**Loss** (`colm/eval/eval_loss.py`): mean token NLL of teacher-forced reference solutions, pooled
+over the whole set, on (a) `heldout`: `holdout_size` MathInstruct examples removed from training
+(`holdout_seed`, drawn uniformly; indices saved as `holdout_indices.json`) and (b) `gsm8k`: the
+GSM8K test solutions in the MathInstruct CoT style. Off by default (`holdout_size=0`,
+`eval_loss_steps=[]` = the paper recipe); `holdout_size > 0` is a deviation from the paper (fewer
+training examples) and must be the same across compared runs. With `eval_loss_steps` the trainer
+evaluates after those steps (`<output_dir>/eval_loss.jsonl`, `eval_<set>_loss` in the trainer log;
+the step after an evaluation is longer, the training peak memory is recorded separately). A
+saved adapter is evaluated with
+`python -m colm.eval.eval_loss --train_config <json> --adapter <ckpt>... [--base] --output <json>`.
+
+### LoRA rank sweep (queue)
+`configs/rank_sweep/sweep.json` expands into a file queue (`colm/jobs`): one JSON job per file,
+one worker drains it serially on one GPU (atomic claim by rename, `done/` / `failed/` with exit
+code, wall clock and log path; a lock file, no polling, no process-name matching).
+```bash
+python -m colm.jobs.rank_sweep --sweep configs/rank_sweep/sweep.json --queue queues/rank-sweep
+python -m colm.jobs.worker --queue queues/rank-sweep --gpu 0 --dry-run    # print resolved jobs
+python -u -m colm.jobs.worker --queue queues/rank-sweep --gpu 0          # run (GPU id is required)
+python -m colm.jobs.summarize --sweep configs/rank_sweep/sweep.json       # out/rank-sweep/summary.md
+```
+Design, arms and timing: `TODO.md` ("LoRA rank sweep").
 
 ## Tests
 ```bash
-CUDA_VISIBLE_DEVICES="" uv run pytest -q     # CPU: tiny random Phi, selection, trainers, 2-rank gloo
+CUDA_VISIBLE_DEVICES="" uv run pytest -q     # CPU: tiny random Phi, selection, trainers, 2-rank gloo, eval loss, job queue
 uv run ruff format . && uv run ruff check .
 ```
 

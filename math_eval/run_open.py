@@ -1,8 +1,19 @@
-# Load model directly
+"""Math evaluation of base models and LoRA checkpoints (PoT with CoT backup), vLLM or HF.
+
+One process evaluates every (model, dataset) pair given, and with vLLM builds the engine once:
+
+    python -u run_open.py --model out/run/checkpoint-512 out/run/checkpoint-1024 \
+        --dataset gsm8k math numglue svamp deepmind simuleq --use_vllm --enable_lora ...
+
+All models must be LoRA checkpoints of the same base model (or a single full model). Results go
+to ``<model>/outputs/<name>.jsonl`` (one line per example) plus ``.metrics.json`` (accuracy,
+counts) and the legacy ``.csv``; a finished output is never recomputed, a partial one is.
+"""
+
 import argparse
 import json
 import os
-import sys
+import time
 
 import pandas as pd
 import torch
@@ -16,75 +27,36 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 DTYPES = {"float32": torch.float32, "bfloat16": torch.bfloat16, "float16": torch.float16}
+DATASETS = ["gsm8k", "svamp", "math", "numglue", "deepmind", "simuleq"]
+STOP_TOKENS = [
+    "Question:",
+    "Question",
+    "USER:",
+    "USER",
+    "ASSISTANT:",
+    "ASSISTANT",
+    "Instruction:",
+    "Instruction",
+    "Response:",
+    "Response",
+    "### Instruction",
+]
+MAX_NEW_TOKENS = 1024
+REPO_OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "out")
 
 
-def run_question_answer(
-    args,
-    lora_request,
-    questions: list,
-    groundtruths: list,
-    collect_rerun: bool = False,
-    lora_path: str = None,
-):
-    used_examples = get_examples(args.dataset, args.shots, args.stem_flan_type)
-    if args.use_vllm:
-        prompt_no_input, prefix = get_prompt(used_examples, args.form)
-        input_strs = [prompt_no_input + prefix.format(query=q) for q in questions]
-        if lora_path:
-            outputs = llm.generate(input_strs, sampling_params, lora_request=lora_request)
-        else:
-            outputs = llm.generate(input_strs, sampling_params)
-        outputs = [output.outputs[0].text for output in outputs]
-    else:
-        outputs = utils.get_answer(
-            examples=used_examples,
-            questions=questions,
-            model=model,
-            tokenizer=tokenizer,
-            form=args.form,
-            max_length=args.model_max_length,
-        )
-
-    # We need to collect the values and possibly the rerun questions;
-    returned_value = []
-    rerun_questions = []
-    rerun_groundtruths = []
-    for output, question, groundtruth in zip(outputs, questions, groundtruths):
-        if "print(" in output:
-            output = output.split("### Instruction")[0]
-            tmp = utils.execute_with_timeout(output)
-            tmp = "The answer is" + " " + tmp
-            answer = utils.answer_clean(args.dataset, ("####", "The answer is"), tmp)
-        else:
-            answer = utils.answer_clean(args.dataset, ("####", "The answer is"), output)
-
-        if answer == "" and collect_rerun:
-            rerun_questions.append(utils.remove_flan_tag(question, args.stem_flan_type))
-            # print('Adding back', rerun_questions[-1])
-            rerun_groundtruths.append(groundtruth)
-            continue
-
-        returned_value.append((question, output, answer, groundtruth))
-
-    if collect_rerun:
-        assert len(returned_value) + len(rerun_questions) == len(questions) == len(groundtruths)
-        return returned_value, rerun_questions, rerun_groundtruths
-    else:
-        return returned_value
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="", type=str)
-    parser.add_argument("--output", default="", type=str)
+def build_parser():
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument(
+        "--model",
+        nargs="+",
+        default=[],
+        help="Model paths / hub ids (LoRA checkpoints share a base).",
+    )
+    parser.add_argument("--output", default="", type=str, help="Single model and dataset only.")
     parser.add_argument("--stem_flan_type", default="", choices=["", "pot_prompt"], type=str)
     parser.add_argument("--dtype", default="bfloat16", type=str)
-    parser.add_argument(
-        "--dataset",
-        required=True,
-        choices=["gsm8k", "svamp", "math", "numglue", "deepmind", "simuleq"],
-        type=str,
-    )
+    parser.add_argument("--dataset", nargs="+", required=True, choices=DATASETS)
     parser.add_argument("--use_vllm", action="store_true", default=False)
     parser.add_argument("--form", default="alpaca", type=str)
     parser.add_argument("--shots", default=0, type=int)
@@ -97,202 +69,327 @@ if __name__ == "__main__":
         "--cache_dir", default=None, type=str, help="HF cache override (default: $HF_HOME)"
     )
     parser.add_argument("--gpu_memory_utilization", default=0.9, type=float)
-    parser.add_argument("--max_lora_rank", default=128, type=int)
+    parser.add_argument(
+        "--max_lora_rank",
+        default=None,
+        type=int,
+        help="vLLM LoRA rank capacity (default: largest rank among the adapters).",
+    )
+    parser.add_argument("--limit", default=None, type=int, help="First N examples per dataset.")
+    parser.add_argument(
+        "--dry_run",
+        action="store_true",
+        help="Check the arguments and build the prompts of every dataset; load no model.",
+    )
+    return parser
 
-    args = parser.parse_args()
 
-    lora_request = None
-    is_peft = os.path.exists(os.path.join(args.model, "adapter_config.json"))
-    if args.use_vllm:
+def is_adapter(path: str) -> bool:
+    return os.path.exists(os.path.join(path, "adapter_config.json"))
+
+
+def adapter_ranks(models: list[str]) -> list[int]:
+    return [LoraConfig.from_pretrained(m).r for m in models if is_adapter(m)]
+
+
+def validate_models(args):
+    """Fail fast on argument combinations that would silently evaluate the wrong thing."""
+    if not args.model:
+        raise SystemExit("--model is required")
+    adapters = [is_adapter(m) for m in args.model]
+    if any(adapters) and not all(adapters):
+        raise SystemExit("--model mixes LoRA checkpoints and full models")
+    if any(adapters):
+        if not args.enable_lora:
+            raise SystemExit(
+                "LoRA checkpoints given without --enable_lora (would evaluate the base)"
+            )
+        bases = {LoraConfig.from_pretrained(m).base_model_name_or_path for m in args.model}
+        if len(bases) != 1:
+            raise SystemExit(f"LoRA checkpoints have different base models: {sorted(bases)}")
+    elif len(args.model) > 1:
+        raise SystemExit("several --model values are only supported for LoRA checkpoints")
+    if args.output and (len(args.model) > 1 or len(args.dataset) > 1):
+        raise SystemExit("--output needs exactly one --model and one --dataset")
+
+
+def build_prompts(examples, questions, form):
+    prompt_no_input, prefix = get_prompt(examples, form)
+    return [prompt_no_input + prefix.format(query=q) for q in questions]
+
+
+# ---------------------------------------------------------------------------
+# Generators: text completions for prompts, under one model path
+# ---------------------------------------------------------------------------
+class VllmGenerator:
+    """One stock-vLLM engine; LoRA checkpoints are served as adapters of the shared base."""
+
+    def __init__(self, args):
         from vllm import LLM, SamplingParams
         from vllm.lora.request import LoRARequest
 
-        lora_request = LoRARequest("adapter", 1, args.model) if args.enable_lora else None
-        stop_tokens = [
-            "Question:",
-            "Question",
-            "USER:",
-            "USER",
-            "ASSISTANT:",
-            "ASSISTANT",
-            "Instruction:",
-            "Instruction",
-            "Response:",
-            "Response",
-            "### Instruction",
-        ]
-        sampling_params = SamplingParams(temperature=0, top_p=1, max_tokens=1024, stop=stop_tokens)
-        # A LoRA checkpoint is served as base model + adapter; the tokenizer (with the
-        # added pad token) is read from the checkpoint directory.
-        base_model = (
-            LoraConfig.from_pretrained(args.model).base_model_name_or_path
-            if is_peft
-            else args.model
+        self.sampling_params = SamplingParams(
+            temperature=0, top_p=1, max_tokens=MAX_NEW_TOKENS, stop=STOP_TOKENS
         )
-        llm = LLM(
+        adapters = [m for m in args.model if is_adapter(m)]
+        self.lora_requests = {
+            path: LoRARequest(f"adapter-{i}", i + 1, path) for i, path in enumerate(adapters)
+        }
+        base_model = (
+            LoraConfig.from_pretrained(adapters[0]).base_model_name_or_path
+            if adapters
+            else args.model[0]
+        )
+        self.llm = LLM(
             model=base_model,
-            tokenizer=args.model,
+            # The tokenizer (with the added pad token) is read from the checkpoint directory.
+            tokenizer=args.model[0],
             tensor_parallel_size=torch.cuda.device_count(),
             dtype=args.dtype,
             gpu_memory_utilization=args.gpu_memory_utilization,
             enable_lora=args.enable_lora,
-            max_lora_rank=args.max_lora_rank,
+            max_lora_rank=args.max_lora_rank or max(adapter_ranks(args.model), default=16),
             download_dir=args.cache_dir,
         )
-        args.batch_size = -1
-        print("Using VLLM, we do not need to set batch size!")
-    else:
-        tokenizer = AutoTokenizer.from_pretrained(
-            args.model, padding_side="left", cache_dir=args.cache_dir
-        )
+        print("Using VLLM, we do not need to set batch size!", flush=True)
 
-        if is_peft:
-            # load this way to make sure that optimizer states match the model structure
-            config = LoraConfig.from_pretrained(args.model)
+    def generate(self, model_path, questions, examples, form):
+        prompts = build_prompts(examples, questions, form)
+        outputs = self.llm.generate(
+            prompts, self.sampling_params, lora_request=self.lora_requests.get(model_path)
+        )
+        return [output.outputs[0].text for output in outputs]
+
+
+class HfGenerator:
+    """Plain transformers generation (one model loaded at a time)."""
+
+    def __init__(self, args):
+        self.args = args
+        self.loaded = None
+
+    def _load(self, path):
+        if self.loaded and self.loaded[0] == path:
+            return self.loaded[1:]
+        args = self.args
+        tokenizer = AutoTokenizer.from_pretrained(
+            path, padding_side="left", cache_dir=args.cache_dir
+        )
+        if is_adapter(path):
+            config = LoraConfig.from_pretrained(path)
             base_model = AutoModelForCausalLM.from_pretrained(
                 config.base_model_name_or_path,
                 dtype=DTYPES[args.dtype],
                 device_map="auto",
                 cache_dir=args.cache_dir,
             )
-            model = PeftModel.from_pretrained(base_model, args.model, device_map="auto")
+            model = PeftModel.from_pretrained(base_model, path, device_map="auto")
         else:
             model = AutoModelForCausalLM.from_pretrained(
-                args.model, device_map="auto", dtype=DTYPES[args.dtype], cache_dir=args.cache_dir
+                path, device_map="auto", dtype=DTYPES[args.dtype], cache_dir=args.cache_dir
             )
         model.eval()
-
-        # pad token is not added by default for pretrained models
         if tokenizer.pad_token is None:
             tokenizer.add_special_tokens({"pad_token": "<pad>"})
-
-        # resize embeddings if needed (e.g. for LlamaTokenizer)
         embedding_size = model.get_input_embeddings().weight.shape[0]
         if len(tokenizer) > embedding_size:
             model.resize_token_embeddings(len(tokenizer))
+        self.loaded = (path, model, tokenizer)
+        return model, tokenizer
 
-    correct, wrong = 0, 0
-    if not args.output:
-        suffix = "PoT" if "pot" in args.stem_flan_type.lower() else "CoT"
-        filename = args.dataset
-        filename += "_" + f"{args.shots}shots" + "_" + args.form
-        filename += f"_length{args.model_max_length}"
-        if args.cot_backup:
-            filename += "_CoTBackup"
-        filename += "_" + f"bs{args.batch_size}" + "_" + suffix + "_import"
-        if os.path.exists(args.model):
-            print(f"Using finetuned model at {args.model}")
-            os.makedirs(f"{args.model}/outputs/", exist_ok=True)
-            args.output = f"{args.model}/outputs/{filename}.jsonl"
-            print("Writing the output to", args.output)
-        else:
-            model_name = args.model.split("/")[-1]
-            print(f"Using pretrained {args.model}.")
-            os.makedirs(f"../out/{model_name}/outputs/", exist_ok=True)
-            args.output = f"../out/{model_name}/outputs/{filename}.jsonl"
-            print("Writing the output to", args.output)
-
-    if os.path.exists(args.output):
-        print("Output file exists, exiting...")
-        sys.exit(0)
-
-    file_handle = open(args.output, "w")
-    for questions, groundtruths in tqdm(BatchDatasetLoader(args.dataset, args.batch_size)):
-        # First pass to use PoT
-        processed_questions = utils.process_question_with_flan_tag(questions, args.stem_flan_type)
-
-        if args.stem_flan_type == "pot_prompt" and args.cot_backup:
-            # if there is hybrid decoding, we try pot fist and then cot
-            returned_values, rerun_questions, rerun_groundtruths = run_question_answer(
-                args,
-                lora_request,
-                processed_questions,
-                groundtruths,
-                collect_rerun=True,
-                lora_path=args.model if args.enable_lora else None,
-            )
-            if rerun_questions:
-                # if things are not working well
-                processed_questions = utils.process_question_with_flan_tag(rerun_questions, "")
-                tmp = run_question_answer(
-                    args,
-                    lora_request,
-                    processed_questions,
-                    rerun_groundtruths,
-                    collect_rerun=False,
-                    lora_path=args.model if args.enable_lora else None,
-                )
-                returned_values += tmp
-        else:
-            # only cot_prompt or pot_prompt, then we don't need to rerun
-            returned_values = run_question_answer(
-                args,
-                lora_request,
-                processed_questions,
-                groundtruths,
-                collect_rerun=False,
-                lora_path=args.model if args.enable_lora else None,
-            )
-
-        for question, output, answer, groundtruth in returned_values:
-            # print(question, '#', answer, '#', groundtruth)
-            if args.dataset == "math":
-                assert len(groundtruth) == 2, groundtruth
-                groundtruth_str, groundtruth_num = groundtruth
-                if utils.compare_both_string_and_number_format(
-                    answer, groundtruth_str, groundtruth_num
-                ):
-                    correct += 1
-                else:
-                    wrong += 1
-            else:
-                if answer == groundtruth:
-                    correct += 1
-                else:
-                    wrong += 1
-
-            if args.print:
-                print(answer, "#", groundtruth, "#", correct / (correct + wrong))
-
-            example = {
-                "question": question,
-                "correct": groundtruth,
-                "solution": output,
-                "pred": answer,
-                "task": args.dataset,
-            }
-
-            file_handle.write(json.dumps(example) + "\n")
-        print("finished one epoch")
-
-    print("final accuracy: ", correct / (correct + wrong))
-    file_handle.close()
-
-    # write the final accuracy to a csv file
-    filename = args.output.replace(".jsonl", ".csv")
-    filename = filename.replace(f"{args.dataset}_{args.shots}shots_", "")
-    if os.path.exists(filename):
-        df = pd.read_csv(filename)
-        df = pd.concat(
-            [
-                df,
-                pd.DataFrame(
-                    {
-                        "dataset": args.dataset,
-                        "accuracy": correct / (correct + wrong),
-                        "shots": args.shots,
-                    },
-                    index=[0],
-                ),
-            ],
-            ignore_index=True,
+    def generate(self, model_path, questions, examples, form):
+        model, tokenizer = self._load(model_path)
+        return utils.get_answer(
+            examples=examples,
+            questions=questions,
+            model=model,
+            tokenizer=tokenizer,
+            form=form,
+            max_length=self.args.model_max_length,
         )
+
+
+# ---------------------------------------------------------------------------
+# Evaluation
+# ---------------------------------------------------------------------------
+def run_question_answer(
+    args, generator, model_path, questions, groundtruths, collect_rerun: bool = False
+):
+    used_examples = get_examples(args.dataset_name, args.shots, args.stem_flan_type)
+    outputs = generator.generate(model_path, questions, used_examples, args.form)
+
+    # We need to collect the values and possibly the rerun questions;
+    returned_value = []
+    rerun_questions = []
+    rerun_groundtruths = []
+    for output, question, groundtruth in zip(outputs, questions, groundtruths, strict=True):
+        if "print(" in output:
+            output = output.split("### Instruction")[0]
+            tmp = utils.execute_with_timeout(output)
+            tmp = "The answer is" + " " + tmp
+            answer = utils.answer_clean(args.dataset_name, ("####", "The answer is"), tmp)
+        else:
+            answer = utils.answer_clean(args.dataset_name, ("####", "The answer is"), output)
+
+        if answer == "" and collect_rerun:
+            rerun_questions.append(utils.remove_flan_tag(question, args.stem_flan_type))
+            rerun_groundtruths.append(groundtruth)
+            continue
+
+        returned_value.append((question, output, answer, groundtruth))
+
+    if collect_rerun:
+        assert len(returned_value) + len(rerun_questions) == len(questions) == len(groundtruths)
+        return returned_value, rerun_questions, rerun_groundtruths
+    return returned_value
+
+
+def is_correct(dataset: str, answer, groundtruth) -> bool:
+    if dataset == "math":
+        assert len(groundtruth) == 2, groundtruth
+        groundtruth_str, groundtruth_num = groundtruth
+        return utils.compare_both_string_and_number_format(answer, groundtruth_str, groundtruth_num)
+    return answer == groundtruth
+
+
+def output_path(args, model_path: str, dataset: str) -> str:
+    if args.output:
+        return args.output
+    suffix = "PoT" if "pot" in args.stem_flan_type.lower() else "CoT"
+    filename = f"{dataset}_{args.shots}shots_{args.form}_length{args.model_max_length}"
+    if args.cot_backup:
+        filename += "_CoTBackup"
+    filename += f"_bs{args.batch_size}_{suffix}_import"
+    if os.path.exists(model_path):
+        out_dir = os.path.join(model_path, "outputs")
     else:
-        df = pd.DataFrame(
-            {
-                "dataset": [args.dataset],
-                "accuracy": [correct / (correct + wrong)],
-                "shots": [args.shots],
-            }
+        out_dir = os.path.join(REPO_OUT, model_path.split("/")[-1], "outputs")
+    os.makedirs(out_dir, exist_ok=True)
+    return os.path.join(out_dir, f"{filename}.jsonl")
+
+
+def append_accuracy_csv(args, path: str, dataset: str, accuracy: float):
+    filename = path.replace(".jsonl", ".csv").replace(f"{dataset}_{args.shots}shots_", "")
+    row = pd.DataFrame({"dataset": [dataset], "accuracy": [accuracy], "shots": [args.shots]})
+    if os.path.exists(filename):
+        row = pd.concat([pd.read_csv(filename), row], ignore_index=True)
+    row.to_csv(filename, index=False)
+
+
+def evaluate_dataset(args, generator, model_path: str, dataset: str) -> dict | None:
+    """Evaluate one dataset; returns the metrics, or None when a finished output exists."""
+    args.dataset_name = dataset
+    path = output_path(args, model_path, dataset)
+    if os.path.exists(path):
+        print(f"Output file {path} exists, skipping", flush=True)
+        return None
+    partial = path + ".partial"
+    correct = wrong = reruns = 0
+    start = time.perf_counter()
+    with open(partial, "w") as file_handle:
+        for questions, groundtruths in tqdm(
+            BatchDatasetLoader(dataset, args.batch_size, limit=args.limit)
+        ):
+            # First pass to use PoT
+            processed_questions = utils.process_question_with_flan_tag(
+                questions, args.stem_flan_type
+            )
+            if args.stem_flan_type == "pot_prompt" and args.cot_backup:
+                # hybrid decoding: try PoT first and fall back to CoT when no answer came out
+                returned_values, rerun_questions, rerun_groundtruths = run_question_answer(
+                    args, generator, model_path, processed_questions, groundtruths, True
+                )
+                reruns += len(rerun_questions)
+                if rerun_questions:
+                    processed_questions = utils.process_question_with_flan_tag(rerun_questions, "")
+                    returned_values += run_question_answer(
+                        args, generator, model_path, processed_questions, rerun_groundtruths
+                    )
+            else:
+                returned_values = run_question_answer(
+                    args, generator, model_path, processed_questions, groundtruths
+                )
+
+            for question, output, answer, groundtruth in returned_values:
+                if is_correct(dataset, answer, groundtruth):
+                    correct += 1
+                else:
+                    wrong += 1
+                if args.print:
+                    print(answer, "#", groundtruth, "#", correct / (correct + wrong))
+                example = {
+                    "question": question,
+                    "correct": groundtruth,
+                    "solution": output,
+                    "pred": answer,
+                    "task": dataset,
+                }
+                file_handle.write(json.dumps(example) + "\n")
+            print("finished one epoch", flush=True)
+    os.replace(partial, path)
+
+    accuracy = correct / (correct + wrong)
+    metrics = {
+        "model": model_path,
+        "dataset": dataset,
+        "accuracy": accuracy,
+        "correct": correct,
+        "total": correct + wrong,
+        "cot_backup_reruns": reruns,
+        "limit": args.limit,
+        "seconds": round(time.perf_counter() - start, 1),
+    }
+    with open(path.replace(".jsonl", ".metrics.json"), "w") as f:
+        json.dump(metrics, f, indent=1)
+    append_accuracy_csv(args, path, dataset, accuracy)
+    print(f"final accuracy: {accuracy}", flush=True)
+    print(
+        f"[eval acc] {model_path} {dataset}: {accuracy:.4f} ({correct}/{correct + wrong}, "
+        f"{metrics['seconds']}s)",
+        flush=True,
+    )
+    return metrics
+
+
+def dry_run(args):
+    """Argument check plus the prompts of every dataset; no model is loaded."""
+    print(f"models: {args.model}")
+    if any(is_adapter(m) for m in args.model):
+        ranks = adapter_ranks(args.model)
+        print(
+            f"LoRA ranks {ranks}; base {LoraConfig.from_pretrained(args.model[0]).base_model_name_or_path}"
         )
-    df.to_csv(filename, index=False)
+    used_examples = get_examples(args.dataset[0], args.shots, args.stem_flan_type)
+    for dataset in args.dataset:
+        questions, _ = next(iter(BatchDatasetLoader(dataset, -1, limit=args.limit)))
+        questions = utils.process_question_with_flan_tag(questions, args.stem_flan_type)
+        prompts = build_prompts(used_examples, questions, args.form)
+        mean_chars = sum(map(len, prompts)) / len(prompts)
+        print(f"[dry run] {dataset}: {len(prompts)} prompts, mean {mean_chars:.0f} chars")
+        print(prompts[0][-300:].replace("\n", "\\n"))
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    validate_models(args)
+    if args.dry_run:
+        dry_run(args)
+        return
+    generator = VllmGenerator(args) if args.use_vllm else HfGenerator(args)
+    if args.use_vllm:
+        args.batch_size = -1
+    all_metrics = []
+    for model_path in args.model:
+        print(
+            f"Using finetuned model at {model_path}" if os.path.exists(model_path) else model_path
+        )
+        for dataset in args.dataset:
+            metrics = evaluate_dataset(args, generator, model_path, dataset)
+            if metrics:
+                all_metrics.append(metrics)
+    print(f"evaluated {len(all_metrics)} (model, dataset) pairs", flush=True)
+    return all_metrics
+
+
+if __name__ == "__main__":
+    main()

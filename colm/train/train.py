@@ -29,12 +29,15 @@ from colm.data.get_training_dataset import (
     convert_superglue_to_hf_source,
     get_training_dataset,
 )
+from colm.data.holdout import save_holdout_indices, split_holdout
 from colm.data.tasks import Sample, get_task
 from colm.data.utils import (
     DataCollatorWithPaddingAndNesting,
     NondiffCollator,
     forward_wrap_with_option_len,
 )
+from colm.eval.arguments import HeldoutEvalArguments
+from colm.eval.eval_loss import add_eval_loss_callback
 from colm.train.data_arguments import DataArguments, get_data_statistics
 from colm.train.model_arguments import ModelArguments, add_padding_to_tokenizer
 from colm.train.trainers import CustomTrainer, SubsetTrainer, SubsetTrainerEfficient
@@ -95,13 +98,15 @@ def configure_wandb(training_args):
 
 
 def main():
-    parser = HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
+    parser = HfArgumentParser(
+        (ModelArguments, DataArguments, TrainingArguments, HeldoutEvalArguments)
+    )
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
-        model_args, data_args, training_args = parser.parse_json_file(
+        model_args, data_args, training_args, eval_args = parser.parse_json_file(
             json_file=os.path.abspath(sys.argv[1])
         )
     else:
-        model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+        model_args, data_args, training_args, eval_args = parser.parse_args_into_dataclasses()
 
     if not model_args.lora_target_modules:
         if "phi-2" in model_args.model_name_or_path:
@@ -223,6 +228,7 @@ def main():
         print(model)
 
     analysis_dataset = None
+    heldout = None
     if "superglue" in data_args.train_files[0]:
         task_name = data_args.train_files[0].split("-")[-1]
         task = get_task(task_name)
@@ -278,6 +284,20 @@ def main():
             seed=data_args.sample_data_seed,
             hf_datasets_cache_dir=data_args.hf_datasets_cache_dir,
         )
+        if eval_args.holdout_size:
+            if not isinstance(train_dataset, SupervisedDataset):
+                raise ValueError(
+                    "holdout_size needs an instruction/output (SupervisedDataset) file"
+                )
+            train_dataset, heldout = split_holdout(
+                train_dataset, eval_args.holdout_size, eval_args.holdout_seed
+            )
+            logger.info(
+                f"Held out {len(heldout)} examples (seed {eval_args.holdout_seed}); "
+                f"training on {len(train_dataset)}"
+            )
+            if training_args.should_save:
+                save_holdout_indices(heldout, training_args.output_dir)
         logger.info(f"TRAIN DATASET: {train_dataset[0].keys()}")
         logger.info(f"TRAIN DATASET EXAMPLE: {train_dataset[0]}")
 
@@ -335,6 +355,8 @@ def main():
         processing_class=tokenizer,
         data_collator=data_collator,
     )
+
+    add_eval_loss_callback(trainer, eval_args, heldout, training_args.output_dir)
 
     train_result = trainer.train(resume_from_checkpoint=model_args.checkpoint_path)
     if torch.cuda.is_available() and trainer.is_world_process_zero():

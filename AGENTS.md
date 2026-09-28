@@ -29,7 +29,13 @@ tokens, W&B keys or machine-private data.
   transfer/sync census, and the summariser (`python -m colm.train.step_timing <jsonl>`). At level
   `off` every timer call is a no-op; keep new timing sections behind `timer.section` / `timer.fine`.
 - `colm/train/*_arguments.py` — all hyperparameters; defaults are the paper recipe.
-- `math_eval/` (vLLM / HF generation), `superglue_eval/` — evaluation scripts.
+- `colm/eval/` — teacher-forced eval loss (`eval_loss.py`: sets, `evaluate_loss`, trainer callback,
+  standalone CLI) and its arguments; `colm/data/holdout.py` — deterministic held-out split.
+- `colm/jobs/` — file queue + the single worker (`file_queue.py`, `worker.py`), sweep expansion
+  (`rank_sweep.py`, specs in `configs/rank_sweep/`) and `summarize.py`. Queues live in the
+  gitignored `queues/`; the worker takes `--gpu` explicitly.
+- `math_eval/` (vLLM / HF generation; `run_open.py` takes several models/datasets per process),
+  `superglue_eval/` — evaluation scripts.
 
 ## Rules
 

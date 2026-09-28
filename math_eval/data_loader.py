@@ -1,8 +1,12 @@
 import json
+import os
 import re
 from statistics import mean
 
 from utils import _strip_string, delete_extra_zero
+
+# Datasets live next to this file so that the scripts run from any working directory.
+DATASET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dataset")
 
 IGNORE_INDEX = -100
 DEFAULT_PAD_TOKEN = "[PAD]"
@@ -117,7 +121,7 @@ def data_reader(dataset: str):
     decoder = json.JSONDecoder()
 
     if dataset == "aqua":
-        with open("dataset/AQuA/AQuA.json") as f:
+        with open(os.path.join(DATASET_DIR, "AQuA/AQuA.json")) as f:
             lines = f.readlines()
             for line in lines:
                 json_res = decoder.raw_decode(line)[0]
@@ -127,13 +131,13 @@ def data_reader(dataset: str):
                 questions.append(json_res["question"].strip() + "\n" + choice)
                 answers.append(json_res["correct"])
     elif dataset == "math":
-        with open("dataset/math/MATH.json") as f:
+        with open(os.path.join(DATASET_DIR, "math/MATH.json")) as f:
             loaded = json.load(f)
         for d in loaded:
             questions.append(d["question"])
             answers.append(d["answer"])
     elif dataset == "gsm8k":
-        with open("dataset/gsm8k/gsm8k.jsonl") as f:
+        with open(os.path.join(DATASET_DIR, "gsm8k/gsm8k.jsonl")) as f:
             lines = f.readlines()
             for line in lines:
                 json_res = decoder.raw_decode(line)[0]
@@ -142,7 +146,7 @@ def data_reader(dataset: str):
                     delete_extra_zero(json_res["answer"].split("#### ")[-1].replace(",", ""))
                 )
     elif dataset == "svamp":
-        with open("dataset/SVAMP/SVAMP.json") as f:
+        with open(os.path.join(DATASET_DIR, "SVAMP/SVAMP.json")) as f:
             json_data = json.load(f)
             for line in json_data:
                 q = line["Body"].strip() + " " + line["Question"].strip()
@@ -152,7 +156,7 @@ def data_reader(dataset: str):
                 questions.append(q)
                 answers.append(delete_extra_zero(a))
     elif "mmlu" in dataset:
-        with open(f"dataset/mmlu/{dataset.split('_')[1]}.json") as f:
+        with open(os.path.join(DATASET_DIR, "mmlu", f"{dataset.split('_')[1]}.json")) as f:
             json_data = json.load(f)
             for line in json_data:
                 options = f"(A) {line['choices'][0]} (B) {line['choices'][1]} (C) {line['choices'][2]} (D) {line['choices'][3]}"
@@ -161,7 +165,7 @@ def data_reader(dataset: str):
                 questions.append(q)
                 answers.append(a)
     elif dataset in ["numglue", "simuleq", "deepmind", "sat"]:
-        with open(f"dataset/{dataset}/{dataset}.json") as f:
+        with open(os.path.join(DATASET_DIR, dataset, f"{dataset}.json")) as f:
             json_data = json.load(f)
             for line in json_data:
                 assert isinstance(line["question"], str) and isinstance(line["question"], str), line
@@ -183,8 +187,10 @@ def data_reader(dataset: str):
 
 
 class BatchDatasetLoader:
-    def __init__(self, dataset: str, batch_size: int):
+    def __init__(self, dataset: str, batch_size: int, limit: int | None = None):
         self.inputs, self.outputs = data_reader(dataset)
+        if limit:  # first `limit` examples only (smoke runs)
+            self.inputs, self.outputs = self.inputs[:limit], self.outputs[:limit]
         self.index = 0
         self.batch_size = batch_size
         self.length = len(self.inputs)

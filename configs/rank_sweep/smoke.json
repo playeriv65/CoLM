@@ -1,0 +1,39 @@
+{
+    "name": "rank-sweep-smoke",
+    "base_config": "configs/rank_sweep/base.json",
+    "output_root": "out/rank-sweep-smoke",
+    "train_overrides": {
+        "max_steps": 6,
+        "save_steps": 3,
+        "eval_loss_steps": [3, 6]
+    },
+    "arms": [
+        {"lora_r": 128, "lora_alpha": 512}
+    ],
+    "eval": {
+        "checkpoints": [3, 6],
+        "datasets": ["gsm8k", "math", "numglue", "svamp", "deepmind", "simuleq"],
+        "dtype": "float16",
+        "shots": 0,
+        "stem_flan_type": "pot_prompt",
+        "model_max_length": 2048,
+        "batch_size": 8,
+        "limit": 20
+    },
+    "env": {
+        "HF_HUB_OFFLINE": "1",
+        "TOKENIZERS_PARALLELISM": "false",
+        "VLLM_WORKER_MULTIPROC_METHOD": "spawn"
+    },
+    "require_env": ["HF_HOME"],
+    "local_cache_env": ["HF_HOME", "HF_HUB_CACHE"],
+    "require_hf_files": {
+        "microsoft/phi-2": [
+            "config.json",
+            "tokenizer.json",
+            "model.safetensors.index.json",
+            "model-00001-of-00002.safetensors",
+            "model-00002-of-00002.safetensors"
+        ]
+    }
+}

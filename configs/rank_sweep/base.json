@@ -1,0 +1,19 @@
+{
+    "model_name_or_path": "microsoft/phi-2",
+    "train_files": ["data/MathInstruct.jsonl"],
+    "max_steps": 1024,
+    "per_device_train_batch_size": 4,
+    "gradient_accumulation_steps": 8,
+    "efficient_mezo": true,
+    "seed": 0,
+    "report_to": "none",
+    "logging_steps": 1,
+    "save_strategy": "steps",
+    "save_steps": 512,
+    "save_only_model": true,
+    "holdout_size": 1000,
+    "holdout_seed": 0,
+    "eval_loss_steps": [256, 512, 768, 1024],
+    "eval_loss_sets": ["heldout", "gsm8k"],
+    "eval_loss_batch_size": 8
+}
