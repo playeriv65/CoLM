@@ -28,7 +28,7 @@ from transformers import HfArgumentParser, TrainerCallback
 
 from colm.data.get_training_dataset import (
     IGNORE_INDEX,
-    DataCollatorForSupervisedDataset,
+    SupervisedCollator,
     SupervisedDataset,
     get_training_dataset,
 )
@@ -104,7 +104,7 @@ def evaluate_loss(
     autocast=contextlib.nullcontext,
 ) -> dict:
     """Pooled mean token NLL of `dataset` (plus per-source breakdown and counts)."""
-    collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
+    collator = SupervisedCollator(tokenizer)
     # Length-sorted batches keep padding small; the result does not depend on the batching.
     order = sorted(
         range(len(dataset)), key=lambda i: len(dataset.sources[i]) + len(dataset.targets[i])

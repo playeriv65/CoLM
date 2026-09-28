@@ -1,6 +1,9 @@
 from dataclasses import dataclass, field
+from typing import Literal
 
 from transformers import TrainingArguments as HFTrainingArguments
+
+from colm.train.literals import check_literals
 
 # Names accepted by --last_layers and the per-layer modules each one expands to.
 LAST_LAYER_GROUPS = {
@@ -45,54 +48,56 @@ class TrainingArguments(HFTrainingArguments):
     wandb_entity: str | None = field(default=None, metadata={"help": "W&B entity."})
     wandb_notes: str | None = field(default=None, metadata={"help": "W&B notes."})
 
-    # --- Analysis ---
-    analysis_mode: bool = field(default=False, metadata={"help": "Build an analysis eval set."})
-    analysis_dataset: str = field(default="bbh", metadata={"help": "Dataset for analysis mode."})
-    train_dataset_names: str | None = field(default=None, metadata={"help": "Space separated."})
+    # --- Upstream alignment ---
+    legacy: bool = field(
+        default=False,
+        metadata={
+            "help": "Temporary bridge: reproduce the upstream CoLM behaviour, including its known "
+            "errors (docs/errors.md), for alignment runs only. Scheduled for removal."
+        },
+    )
 
     # --- Mini-batch coreset selection ---
     small_batch_ratio: float = field(
         default=0.5, metadata={"help": "Fraction of the large mini-batch that is trained on."}
     )
-    data_selection_method: str = field(
-        default="submodlib",
+    micro_batch_size: int = field(
+        default=0,
         metadata={
-            "help": "How to select the small batch from the large batch.",
-            "choices": ["submodlib", "weightedsubmodlib", "none"],
+            "help": "Set by __post_init__: examples per forward of a coreset run. There "
+            "per_device_train_batch_size is the whole selection pool (micro batch x "
+            "gradient_accumulation_steps) and gradient_accumulation_steps is 1."
         },
+    )
+    data_selection_method: Literal["submodlib", "weightedsubmodlib", "none"] = field(
+        default="submodlib",
+        metadata={"help": "How to select the small batch from the large batch."},
     )
     efficient_mezo: bool = field(
         default=False,
         metadata={"help": "Batched last-layer MeZO estimate (SubsetTrainerEfficient)."},
     )
-    data_selection_unit: str = field(
+    data_selection_unit: Literal[
+        "rep", "mezo", "masked_grad", "completion_length", "length_loss_weighted"
+    ] = field(
         default="mezo",
-        metadata={
-            "help": "Per-example feature used for selection.",
-            "choices": ["rep", "mezo", "masked_grad", "completion_length", "length_loss_weighted"],
-        },
+        metadata={"help": "Per-example feature used for selection."},
     )
-    facility_similarity: str = field(
+    facility_similarity: Literal["cosine", "euclidean", "l1"] = field(
         default="l1",
-        metadata={
-            "help": "Facility-location similarity.",
-            "choices": ["cosine", "euclidean", "l1"],
-        },
+        metadata={"help": "Facility-location similarity."},
     )
-    source_wise_selection: str = field(
+    source_wise_selection: Literal["none", "proportional", "balanced"] = field(
         default="proportional",
-        metadata={
-            "help": "How many examples to select per data source.",
-            "choices": ["none", "proportional", "balanced"],
-        },
+        metadata={"help": "How many examples to select per data source."},
     )
     keep_sources: str = field(
         default="0_1_3_5_7_8_9_10_11_13",
         metadata={"help": "Source indices kept in full (not selected), separated by '_'."},
     )
-    num_per_class_start: str = field(
+    num_per_class_start: Literal["floor", "ceil"] = field(
         default="floor",
-        metadata={"help": "Rounding of the per-source budget.", "choices": ["floor", "ceil"]},
+        metadata={"help": "Rounding of the per-source budget."},
     )
     save_indices: bool = field(
         default=False, metadata={"help": "Save the large-batch and selected example indices."}
@@ -100,36 +105,29 @@ class TrainingArguments(HFTrainingArguments):
 
     # --- Zeroth-order (MeZO) last-layer gradient estimate ---
     mezo_eps: float = field(default=1e-3, metadata={"help": "MeZO perturbation scale."})
-    mezo_transform: str = field(
-        default="none",
-        metadata={
-            "help": "Transform of the gradient estimates (SubsetTrainer only).",
-            "choices": ["none", "self_normalize", "normalize", "clip_full", "clip_last"],
-        },
+    mezo_transform: Literal["none", "self_normalize", "normalize", "clip_full", "clip_last"] = (
+        field(
+            default="none",
+            metadata={"help": "Transform of the gradient estimates (SubsetTrainer only)."},
+        )
     )
-    mezo_selection: str = field(
+    mezo_selection: Literal["weight_grad", "weight", "grad"] = field(
         default="grad",
-        metadata={
-            "help": "Feature built from the estimate.",
-            "choices": ["weight_grad", "weight", "grad"],
-        },
+        metadata={"help": "Feature built from the estimate."},
     )
-    mezo_topk: str = field(
+    mezo_topk: Literal["largest", "smallest", "random", "sampling", "largest_smallest"] = field(
         default="largest",
-        metadata={
-            "help": "Which coordinates of the estimate are kept.",
-            "choices": ["largest", "smallest", "random", "sampling", "largest_smallest"],
-        },
+        metadata={"help": "Which coordinates of the estimate are kept."},
     )
-    mezo_optim: str = field(
+    mezo_optim: Literal["sgd", "adam"] = field(
         default="adam",
-        metadata={"help": "Optimizer whose update is used as feature.", "choices": ["sgd", "adam"]},
+        metadata={"help": "Optimizer whose update is used as feature."},
     )
     zo_dim: int = field(default=2560, metadata={"help": "Number of kept coordinates."})
     last_layer_index: int = field(
-        default=31, metadata={"help": "Index of the last decoder layer (31 for 32-layer models)."}
+        default=-1, metadata={"help": "Decoder layer whose LoRA B is perturbed; -1 = the last."}
     )
-    last_layers: str | list[str] = field(
+    last_layers: str = field(
         default="v_proj",
         metadata={
             "help": "Module(s) of the last layer whose LoRA B is perturbed.",
@@ -156,13 +154,12 @@ class TrainingArguments(HFTrainingArguments):
     )
 
     # --- Step timing (colm/train/step_timing.py) ---
-    profile_timing: str = field(
+    profile_timing: Literal["off", "coarse", "fine"] = field(
         default="off",
         metadata={
             "help": "Per-phase wall-clock breakdown of every optimizer step. 'off' adds no "
             "synchronize; 'coarse' times the phases with a CUDA synchronize at each boundary; "
-            "'fine' also times per-layer / per-op sub-phases (more syncs, slight inflation).",
-            "choices": ["off", "coarse", "fine"],
+            "'fine' also times per-layer / per-op sub-phases (more syncs, slight inflation)."
         },
     )
     profile_timing_dir: str | None = field(
@@ -181,23 +178,32 @@ class TrainingArguments(HFTrainingArguments):
     max_new_tokens: int = field(
         default=50, metadata={"help": "Maximum number of generated tokens."}
     )
-    non_diff: bool = field(
-        default=False, metadata={"help": "Non-differentiable objective (SQuAD F1)."}
-    )
     only_train_option: bool = field(default=True, metadata={"help": "Only train the option part."})
-    modify_forward: bool = field(
-        default=False, metadata={"help": "Set when the forward is wrapped."}
-    )
+
+    @property
+    def pool_micro_batches(self) -> int:
+        return self.per_device_train_batch_size // (self.micro_batch_size or 1)
+
+    @property
+    def coreset(self) -> bool:
+        return self.data_selection_method != "none"
+
+    @property
+    def keep_source_ids(self) -> list[int]:
+        """`keep_sources` ("0_1_3", or a list) as integer source ids."""
+        if isinstance(self.keep_sources, str):
+            return [int(i) for i in self.keep_sources.split("_") if i]
+        return [int(i) for i in self.keep_sources]
 
     def __post_init__(self):
         # train.py fills in a descriptive name once the model name is known.
         self.output_dir_is_auto = self.output_dir is None
-        if isinstance(self.train_dataset_names, str):
-            self.train_dataset_names = self.train_dataset_names.split(" ")
         if isinstance(self.last_layers, str):
-            modules = LAST_LAYER_GROUPS.get(self.last_layers, [self.last_layers])
-            self.last_layers = [
-                f"layers.{self.last_layer_index}.{'self_attn' if m in ATTENTION_MODULES else 'mlp'}.{m}"
-                for m in modules
-            ]
+            self.last_layers = LAST_LAYER_GROUPS.get(self.last_layers, [self.last_layers])
+        if self.coreset and not self.micro_batch_size:
+            # The selection pool is one HF batch: one optimizer step = one training_step call.
+            self.micro_batch_size = self.per_device_train_batch_size
+            self.per_device_train_batch_size *= self.gradient_accumulation_steps
+            self.gradient_accumulation_steps = 1
         super().__post_init__()
+        check_literals(self)

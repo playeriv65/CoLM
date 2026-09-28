@@ -19,7 +19,9 @@ def assert_same(a, b, path="", atol=0.0):
         if atol == 0.0:
             assert torch.equal(a.to(b.dtype), b), f"{path}: tensors differ"
         else:
-            torch.testing.assert_close(a.double(), b.double(), rtol=0, atol=atol, msg=lambda m: f"{path}: {m}")
+            torch.testing.assert_close(
+                a.double(), b.double(), rtol=0, atol=atol, msg=lambda m: f"{path}: {m}"
+            )
     elif isinstance(a, dict):
         assert a.keys() == b.keys(), f"{path}: keys {sorted(a)} != {sorted(b)}"
         for k in a:

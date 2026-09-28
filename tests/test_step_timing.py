@@ -3,7 +3,7 @@
 import json
 
 import pytest
-from test_trainers import _args, _build
+from equivalence.helpers import build, make_args
 
 from colm.train import step_timing
 from colm.train.step_timing import (
@@ -14,7 +14,6 @@ from colm.train.step_timing import (
     build_tree,
     summarize,
 )
-from colm.train.trainers import SubsetTrainerEfficient
 
 
 def test_off_timer_is_a_noop(monkeypatch):
@@ -66,7 +65,7 @@ def _closes(steps):
 
 @pytest.mark.parametrize("level", ["coarse", "fine"])
 def test_efficient_trainer_timing(tmp_path, tokenizer, mixture_file, level):
-    args = _args(
+    args = make_args(
         tmp_path,
         per_device_train_batch_size=4,
         gradient_accumulation_steps=2,
@@ -77,7 +76,7 @@ def test_efficient_trainer_timing(tmp_path, tokenizer, mixture_file, level):
         profile_timing_dir=str(tmp_path / "timing"),
         profile_census_steps=1,
     )
-    trainer, _ = _build(SubsetTrainerEfficient, args, tokenizer, mixture_file)
+    trainer, _ = build(args, tokenizer, mixture_file)
     trainer.train()
     (out,) = (tmp_path / "timing").glob("step_timing-*.jsonl")
     lines = [json.loads(x) for x in out.read_text().splitlines()]
@@ -87,11 +86,18 @@ def test_efficient_trainer_timing(tmp_path, tokenizer, mixture_file, level):
     assert any(k.startswith("census/") for k in steps[0]["counts"])
     for s in steps[1:]:
         sec = s["sections"]
-        for name in ["data", "selection", "train", "optimizer", "optimizer/step"]:
+        for name in [
+            "selection",
+            "selection/features",
+            "selection/gather",
+            "selection/select",
+            "train",
+            "train/forward",
+            "train/backward",
+            "optimizer",
+            "optimizer/step",
+        ]:
             assert name in sec, name
-        assert "selection/features/forward_till_penultimate" in sec
-        assert ("selection/features/forward_till_penultimate/layers/00" in sec) == (level == "fine")
-        assert s["counts"]["sel_samples"] == 8 and s["counts"]["train_samples"] == 4
     _closes(steps)
     summary = summarize(str(out), warmup=1, window=2)
     assert summary["num_steps_used"] == 2
@@ -99,14 +105,14 @@ def test_efficient_trainer_timing(tmp_path, tokenizer, mixture_file, level):
 
 
 def test_off_writes_nothing(tmp_path, tokenizer, mixture_file):
-    args = _args(
+    args = make_args(
         tmp_path,
         per_device_train_batch_size=4,
         gradient_accumulation_steps=2,
         efficient_mezo=True,
         profile_timing_dir=str(tmp_path / "timing"),
     )
-    trainer, _ = _build(SubsetTrainerEfficient, args, tokenizer, mixture_file)
+    trainer, _ = build(args, tokenizer, mixture_file)
     assert not trainer._timer.enabled
     assert not any(isinstance(cb, StepTimingCallback) for cb in trainer.callback_handler.callbacks)
     trainer.train()

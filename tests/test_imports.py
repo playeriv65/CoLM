@@ -21,8 +21,9 @@ def test_import_every_colm_module():
 def test_trak_and_old_trainer_copies_are_gone():
     assert not (REPO / "colm/train/subset_trainer_distributed.py").exists()
     assert not (REPO / "colm/train/huggingface_trainer.py").exists()
-    source = (REPO / "colm/train/utils.py").read_text()
-    assert "trak" not in source
+    assert not (
+        REPO / "colm/train/custom_phi.py"
+    ).exists()  # replaced by selection.zo.LastLayerSplit
 
 
 @pytest.mark.parametrize("module", ["utils", "prompt_utils", "data_loader", "run_open"])

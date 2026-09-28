@@ -15,7 +15,6 @@ _PER_EXAMPLE_FIELDS = (
     "targets",
     "data_sources",
     "indices",
-    "weights",
     "completion_lengths",
 )
 HOLDOUT_INDICES_FILENAME = "holdout_indices.json"

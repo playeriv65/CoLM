@@ -10,7 +10,7 @@ import pytest
 import torch
 from conftest import make_phi
 
-from colm.data.get_training_dataset import DataCollatorForSupervisedDataset, get_training_dataset
+from colm.data.get_training_dataset import SupervisedCollator, get_training_dataset
 from colm.data.holdout import select_examples, split_holdout
 from colm.eval.arguments import HeldoutEvalArguments
 from colm.eval.eval_loss import (
@@ -86,7 +86,7 @@ def test_evaluate_loss_matches_per_example_hf_loss(phi, tokenizer, dataset):
     assert pooled["loss"] == pytest.approx(single["loss"], rel=1e-5)
     assert pooled["n_examples"] == 7
 
-    collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
+    collator = SupervisedCollator(tokenizer)
     total, count = 0.0, 0
     with torch.no_grad():
         for i in range(7):

@@ -11,92 +11,25 @@ feature gather); for fp32 / fp16 models both patches are no-ops.
 """
 
 import argparse
-import json
 import os
-import string
+import pathlib
 import sys
-import types
 
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
 import numpy as np
 import torch
-from peft import LoraConfig, TaskType, get_peft_model
-from tokenizers import Regex, Tokenizer, models, pre_tokenizers
-from transformers import PhiConfig, PhiForCausalLM, PreTrainedTokenizerFast
+
+sys.path.insert(0, str(pathlib.Path(__file__).parent))
+from colm.train.facility_location import get_orders_and_weights
+from fixtures import NUM_LAYERS, mixture, model_fp64, tokenizer  # noqa: E402
 
 from colm.data.get_training_dataset import (
     DataCollatorForSupervisedDatasetWithSource,
     get_training_dataset,
 )
-from colm.train.facility_location import get_orders_and_weights
 from colm.train.trainers import CustomTrainer, SubsetTrainer, SubsetTrainerEfficient
 from colm.train.training_arguments import TrainingArguments
-
-NUM_LAYERS, NUM_SOURCES = 2, 4
-
-
-def tokenizer():
-    chars = sorted(set(string.printable))
-    vocab = {t: i for i, t in enumerate(["<unk>", "</s>", "<pad>"] + chars)}
-    backend = Tokenizer(models.WordLevel(vocab=vocab, unk_token="<unk>"))
-    backend.pre_tokenizer = pre_tokenizers.Split(Regex(r"[\s\S]"), behavior="isolated")
-    return PreTrainedTokenizerFast(
-        tokenizer_object=backend,
-        unk_token="<unk>",
-        eos_token="</s>",
-        pad_token="<pad>",
-        model_max_length=512,
-    )
-
-
-def mixture(path):
-    rows = []
-    for i in range(64):
-        rows.append(
-            {
-                "instruction": f"Add {i} and {i % 7}.",
-                "input": "" if i % 2 else f"numbers {i} {i % 7}",
-                "output": f"The answer is {i + i % 7}." + " ok" * (i % 5),
-                "source": f"source_{i % NUM_SOURCES}",
-                "original_index": i,
-                "completion_length": 5 + i % 5,
-            }
-        )
-    with open(path, "w") as f:
-        f.write("\n".join(json.dumps(r) for r in rows) + "\n")
-
-
-def model_fp64(tok, lora_dropout=0.0, resid_pdrop=0.0):
-    torch.manual_seed(0)
-    config = PhiConfig(
-        vocab_size=len(tok),
-        hidden_size=32,
-        intermediate_size=64,
-        num_hidden_layers=NUM_LAYERS,
-        num_attention_heads=4,
-        max_position_embeddings=512,
-        partial_rotary_factor=0.5,
-        pad_token_id=tok.pad_token_id,
-        resid_pdrop=resid_pdrop,
-    )
-    config._attn_implementation = "sdpa"
-    model = PhiForCausalLM(config)
-    lora = LoraConfig(
-        task_type=TaskType.CAUSAL_LM,
-        r=4,
-        lora_alpha=16,
-        lora_dropout=lora_dropout,
-        target_modules=["q_proj", "k_proj", "v_proj", "fc1", "fc2"],
-    )
-    model = get_peft_model(model, lora)
-    model.enable_input_require_grads()
-    torch.manual_seed(1)
-    with torch.no_grad():
-        for n, p in model.named_parameters():
-            if "lora_B" in n:
-                p.normal_(std=0.05)
-    return model.double()
 
 
 def patch_reference():
@@ -120,7 +53,9 @@ def patch_reference():
         if per_sample_loss:
             b, s = shift_labels.shape
             per_token = torch.nn.functional.cross_entropy(
-                shift_logits.view(-1, self.config.vocab_size), shift_labels.view(-1), reduction="none"
+                shift_logits.view(-1, self.config.vocab_size),
+                shift_labels.view(-1),
+                reduction="none",
             ).view(b, s)
             return per_token.mean(dim=1), logits
         return (
@@ -198,7 +133,11 @@ def gen_fl():
     for name, X, y in [
         ("random", rng.normal(size=(40, 16)).astype(np.float32), None),
         ("ties", ties, None),
-        ("sources", rng.normal(size=(48, 8)).astype(np.float32), np.array([0] * 24 + [5] * 16 + [9] * 8)),
+        (
+            "sources",
+            rng.normal(size=(48, 8)).astype(np.float32),
+            np.array([0] * 24 + [5] * 16 + [9] * 8),
+        ),
     ]:
         for metric in ("l1", "euclidean", "cosine"):
             for strategy in ("none", "proportional"):
@@ -206,12 +145,24 @@ def gen_fl():
                     continue
                 for start in ("floor", "ceil"):
                     order, w = get_orders_and_weights(
-                        12, torch.from_numpy(X), metric, y=y, per_class_start=start, strategy=strategy
+                        12,
+                        torch.from_numpy(X),
+                        metric,
+                        y=y,
+                        per_class_start=start,
+                        strategy=strategy,
                     )
                     cases.append(
-                        {"name": name, "X": torch.from_numpy(X), "y": None if y is None else torch.from_numpy(y),
-                         "metric": metric, "strategy": strategy, "start": start,
-                         "order": torch.from_numpy(order.astype(np.int64)), "weights": torch.from_numpy(w)}
+                        {
+                            "name": name,
+                            "X": torch.from_numpy(X),
+                            "y": None if y is None else torch.from_numpy(y),
+                            "metric": metric,
+                            "strategy": strategy,
+                            "start": start,
+                            "order": torch.from_numpy(order.astype(np.int64)),
+                            "weights": torch.from_numpy(w),
+                        }
                     )
     return cases
 
@@ -239,8 +190,13 @@ def gen_select(tok, data, tmp):
     """`_select_on_main` on synthetic features over a 5-step sequence, per configuration."""
     cases = []
     for ci, over in enumerate(SELECT_GRID):
-        args = args_for(tmp / f"sel{ci}", per_device_train_batch_size=1, gradient_accumulation_steps=32,
-                        small_batch_ratio=0.5, **over)
+        args = args_for(
+            tmp / f"sel{ci}",
+            per_device_train_batch_size=1,
+            gradient_accumulation_steps=32,
+            small_batch_ratio=0.5,
+            **over,
+        )
         trainer, model = build(SubsetTrainer, args, tok, data)
         ds = trainer.train_dataset
         rng = np.random.RandomState(100 + ci)
@@ -249,24 +205,45 @@ def gen_select(tok, data, tmp):
         for step in range(5):
             n = 32
             idx = rng.permutation(len(ds))[:n]
-            feats = torch.from_numpy(rng.normal(size=(n, d)) * (0.5 + rng.rand(n, 1))).to(torch.float32)
+            feats = torch.from_numpy(rng.normal(size=(n, d)) * (0.5 + rng.rand(n, 1))).to(
+                torch.float32
+            )
             examples = [{"sources": [ds.data_sources[i]], "indices": [ds.indices[i]]} for i in idx]
             trainer.state.global_step = step
             torch.manual_seed(step)
             np.random.seed(step)
             sel, w = trainer._select_on_main(feats.clone(), examples, 16)
-            steps.append({"feats": feats, "sources": [ds.data_sources[i] for i in idx], "step": step,
-                          "selected": list(sel), "weights": list(w)})
-        cases.append({"over": {k: v for k, v in over.items()}, "steps": steps,
-                      "param_dim": d, "prev_m": trainer.prev_m_t, "prev_v": trainer.prev_v_t})
+            steps.append(
+                {
+                    "feats": feats,
+                    "sources": [ds.data_sources[i] for i in idx],
+                    "step": step,
+                    "selected": list(sel),
+                    "weights": list(w),
+                }
+            )
+        cases.append(
+            {
+                "over": {k: v for k, v in over.items()},
+                "steps": steps,
+                "param_dim": d,
+                "prev_m": trainer.prev_m_t,
+                "prev_v": trainer.prev_v_t,
+            }
+        )
     return cases
 
 
 def gen_features(tok, data, tmp):
     out = {}
     for unit in ("rep", "mezo", "masked_grad", "completion_length", "length_loss_weighted"):
-        args = args_for(tmp / f"f{unit}", per_device_train_batch_size=1, gradient_accumulation_steps=4,
-                        data_selection_unit=unit, keep_sources="")
+        args = args_for(
+            tmp / f"f{unit}",
+            per_device_train_batch_size=1,
+            gradient_accumulation_steps=4,
+            data_selection_unit=unit,
+            keep_sources="",
+        )
         trainer, model = build(SubsetTrainer, args, tok, data)
         loader = trainer.get_train_dataloader()
         feats = []
@@ -278,8 +255,13 @@ def gen_features(tok, data, tmp):
             feats.append(trainer.save_select(batch))
         out[unit] = [torch.as_tensor(f) for f in feats]
         out[unit + "_param"] = lora_state(model)
-    args = args_for(tmp / "feff", per_device_train_batch_size=4, gradient_accumulation_steps=2,
-                    efficient_mezo=True, keep_sources="")
+    args = args_for(
+        tmp / "feff",
+        per_device_train_batch_size=4,
+        gradient_accumulation_steps=2,
+        efficient_mezo=True,
+        keep_sources="",
+    )
     trainer, model = build(SubsetTrainerEfficient, args, tok, data)
     loader = trainer.get_train_dataloader()
     out["efficient"] = [trainer.save_select(b) for _, b in zip(range(2), loader)]
@@ -287,7 +269,9 @@ def gen_features(tok, data, tmp):
     dec = trainer.decomposer
     b = next(iter(loader))
     with torch.no_grad():
-        mid = dec.forward_till_penultimate(input_ids=b["input_ids"], attention_mask=b["attention_mask"])
+        mid = dec.forward_till_penultimate(
+            input_ids=b["input_ids"], attention_mask=b["attention_mask"]
+        )
         loss, logits = dec.forward_final_layer(mid, labels=b["labels"], per_sample_loss=True)
     out["efficient_loss"] = loss
     out["efficient_param"] = lora_state(model)
@@ -295,27 +279,96 @@ def gen_features(tok, data, tmp):
 
 
 TRAJ = {
-    "custom": (CustomTrainer, dict(per_device_train_batch_size=2, gradient_accumulation_steps=2,
-                                   data_selection_method="none")),
-    "efficient": (SubsetTrainerEfficient, dict(per_device_train_batch_size=4, gradient_accumulation_steps=2,
-                                               efficient_mezo=True, keep_sources="0")),
-    "efficient_nokeep": (SubsetTrainerEfficient, dict(per_device_train_batch_size=4, gradient_accumulation_steps=2,
-                                                      efficient_mezo=True, keep_sources="")),
-    "efficient_dropout": (SubsetTrainerEfficient, dict(per_device_train_batch_size=4, gradient_accumulation_steps=2,
-                                                       efficient_mezo=True, keep_sources="0")),
-    "subset_mezo": (SubsetTrainer, dict(per_device_train_batch_size=1, gradient_accumulation_steps=8,
-                                        data_selection_unit="mezo", keep_sources="0")),
-    "subset_mezo_weighted": (SubsetTrainer, dict(per_device_train_batch_size=1, gradient_accumulation_steps=8,
-                                                 data_selection_unit="mezo", keep_sources="",
-                                                 data_selection_method="weightedsubmodlib")),
-    "subset_rep": (SubsetTrainer, dict(per_device_train_batch_size=1, gradient_accumulation_steps=8,
-                                       data_selection_unit="rep", keep_sources="")),
-    "subset_masked_grad": (SubsetTrainer, dict(per_device_train_batch_size=1, gradient_accumulation_steps=8,
-                                               data_selection_unit="masked_grad", keep_sources="")),
-    "subset_completion_length": (SubsetTrainer, dict(per_device_train_batch_size=1, gradient_accumulation_steps=8,
-                                                     data_selection_unit="completion_length", keep_sources="")),
-    "subset_length_loss": (SubsetTrainer, dict(per_device_train_batch_size=1, gradient_accumulation_steps=8,
-                                               data_selection_unit="length_loss_weighted", keep_sources="")),
+    "custom": (
+        CustomTrainer,
+        dict(
+            per_device_train_batch_size=2,
+            gradient_accumulation_steps=2,
+            data_selection_method="none",
+        ),
+    ),
+    "efficient": (
+        SubsetTrainerEfficient,
+        dict(
+            per_device_train_batch_size=4,
+            gradient_accumulation_steps=2,
+            efficient_mezo=True,
+            keep_sources="0",
+        ),
+    ),
+    "efficient_nokeep": (
+        SubsetTrainerEfficient,
+        dict(
+            per_device_train_batch_size=4,
+            gradient_accumulation_steps=2,
+            efficient_mezo=True,
+            keep_sources="",
+        ),
+    ),
+    "efficient_dropout": (
+        SubsetTrainerEfficient,
+        dict(
+            per_device_train_batch_size=4,
+            gradient_accumulation_steps=2,
+            efficient_mezo=True,
+            keep_sources="0",
+        ),
+    ),
+    "subset_mezo": (
+        SubsetTrainer,
+        dict(
+            per_device_train_batch_size=1,
+            gradient_accumulation_steps=8,
+            data_selection_unit="mezo",
+            keep_sources="0",
+        ),
+    ),
+    "subset_mezo_weighted": (
+        SubsetTrainer,
+        dict(
+            per_device_train_batch_size=1,
+            gradient_accumulation_steps=8,
+            data_selection_unit="mezo",
+            keep_sources="",
+            data_selection_method="weightedsubmodlib",
+        ),
+    ),
+    "subset_rep": (
+        SubsetTrainer,
+        dict(
+            per_device_train_batch_size=1,
+            gradient_accumulation_steps=8,
+            data_selection_unit="rep",
+            keep_sources="",
+        ),
+    ),
+    "subset_masked_grad": (
+        SubsetTrainer,
+        dict(
+            per_device_train_batch_size=1,
+            gradient_accumulation_steps=8,
+            data_selection_unit="masked_grad",
+            keep_sources="",
+        ),
+    ),
+    "subset_completion_length": (
+        SubsetTrainer,
+        dict(
+            per_device_train_batch_size=1,
+            gradient_accumulation_steps=8,
+            data_selection_unit="completion_length",
+            keep_sources="",
+        ),
+    ),
+    "subset_length_loss": (
+        SubsetTrainer,
+        dict(
+            per_device_train_batch_size=1,
+            gradient_accumulation_steps=8,
+            data_selection_unit="length_loss_weighted",
+            keep_sources="",
+        ),
+    ),
 }
 
 
@@ -331,8 +384,13 @@ def gen_trajectories(tok, data, tmp):
 
             def sel(all_reps, complete_examples, total, _o=orig_sel):
                 idx, w = _o(all_reps, complete_examples, total)
-                selections.append({"pool": [int(e["indices"][0]) for e in complete_examples],
-                                   "selected": list(idx), "weights": list(w)})
+                selections.append(
+                    {
+                        "pool": [int(e["indices"][0]) for e in complete_examples],
+                        "selected": list(idx),
+                        "weights": list(w),
+                    }
+                )
                 return idx, w
 
             trainer._select_on_main = sel
@@ -340,8 +398,15 @@ def gen_trajectories(tok, data, tmp):
 
         def ts(m, inputs, num=None, _o=orig_ts):
             if inputs:
-                trained.append({"step": trainer.state.global_step, "indices": [int(i) for i in inputs["indices"]],
-                                "weight": None if "colm_sample_weight" not in inputs else float(inputs["colm_sample_weight"])})
+                trained.append(
+                    {
+                        "step": trainer.state.global_step,
+                        "indices": [int(i) for i in inputs["indices"]],
+                        "weight": None
+                        if "colm_sample_weight" not in inputs
+                        else float(inputs["colm_sample_weight"]),
+                    }
+                )
                 if not rng_first or rng_first[-1][0] != trainer.state.global_step:
                     rng_first.append((trainer.state.global_step, torch.get_rng_state().clone()))
             return _o(m, inputs, num)
@@ -351,8 +416,11 @@ def gen_trajectories(tok, data, tmp):
         out[name] = {
             "selections": selections,
             "trained": trained,
-            "log": [{k: v for k, v in h.items() if k in ("step", "loss", "grad_norm", "learning_rate")}
-                    for h in trainer.state.log_history if "loss" in h],
+            "log": [
+                {k: v for k, v in h.items() if k in ("step", "loss", "grad_norm", "learning_rate")}
+                for h in trainer.state.log_history
+                if "loss" in h
+            ],
             "lora": lora_state(model),
             "rng_at_train_start": [s for _, s in rng_first],
         }

@@ -1,5 +1,5 @@
 import contextlib
-import copy
+import logging
 import random
 from collections import defaultdict
 from collections.abc import Sequence
@@ -12,11 +12,11 @@ import torch
 import transformers
 from datasets import load_dataset
 from torch.utils.data import Dataset
-from tqdm import tqdm
 
 import colm.data.utils as utils
 
 IGNORE_INDEX = -100
+logger = logging.getLogger(__name__)
 
 
 @contextlib.contextmanager
@@ -360,51 +360,8 @@ def encode_with_messages_format(example, tokenizer, max_seq_length):
     }
 
 
-def _tokenize_fn(strings: Sequence[str], tokenizer: transformers.PreTrainedTokenizer) -> dict:
-    """Tokenize a list of strings."""
-    tokenized_list = [
-        tokenizer(
-            text,
-            return_tensors="pt",
-            padding="longest",
-            max_length=tokenizer.model_max_length,
-            truncation=True,
-        )
-        for text in strings
-    ]
-    input_ids = labels = [tokenized.input_ids[0] for tokenized in tokenized_list]
-    input_ids_lens = labels_lens = [
-        tokenized.input_ids.ne(tokenizer.pad_token_id).sum().item() for tokenized in tokenized_list
-    ]
-    return dict(
-        input_ids=input_ids,
-        labels=labels,
-        input_ids_lens=input_ids_lens,
-        labels_lens=labels_lens,
-    )
-
-
-def preprocess(
-    sources: Sequence[str],
-    targets: Sequence[str],
-    tokenizer: transformers.PreTrainedTokenizer,
-) -> dict:
-    """Preprocess the data by tokenizing."""
-    examples = [s + t for s, t in zip(sources, targets)]
-    examples_tokenized, sources_tokenized = [
-        _tokenize_fn(strings, tokenizer) for strings in (examples, sources)
-    ]
-    input_ids = examples_tokenized["input_ids"]
-    labels = copy.deepcopy(input_ids)
-
-    for label, source_len in zip(labels, sources_tokenized["input_ids_lens"]):
-        label[:source_len] = IGNORE_INDEX
-
-    return dict(input_ids=input_ids, labels=labels)
-
-
 class SupervisedDataset(Dataset):
-    """Dataset for supervised fine-tuning."""
+    """Prompt / completion pairs with their source, original index and completion length."""
 
     def __init__(
         self,
@@ -413,114 +370,43 @@ class SupervisedDataset(Dataset):
         template_variation: bool,
     ):
         super().__init__()
+        prompts = (
+            utils.PROMPT_TEMPLATE[random.randrange(len(utils.PROMPT_TEMPLATE))]
+            if template_variation
+            else utils.PROMPT_TEMPLATE_SINGLE
+        )
+        prompt_input, prompt_no_input = prompts["prompt_input"], prompts["prompt_no_input"]
 
-        print("Formatting inputs...")
-        if template_variation:
-            PROMPT_DICT = random.choice(utils.PROMPT_TEMPLATE)
-        # Change prompt for less datasets
-        else:
-            PROMPT_DICT = utils.PROMPT_TEMPLATE_SINGLE
-        prompt_input, prompt_no_input = PROMPT_DICT["prompt_input"], PROMPT_DICT["prompt_no_input"]
-
-        sources = []
-        targets = []
-        data_sources = []
-        indices = []
-        weights = []
-        completion_lengths = []  # Phi-2 tokenizer
-        num_empty_output = 0
-        all_data_sources = set()
-
+        self.sources, self.targets, names, self.indices, self.completion_lengths = (
+            [],
+            [],
+            [],
+            [],
+            [],
+        )
+        discarded = 0
         for example in list_data_dict:
-            # There is an example with missing output
-            # https://github.com/TIGER-AI-Lab/MAmmoTH/issues/36
+            # An example with an empty output (https://github.com/TIGER-AI-Lab/MAmmoTH/issues/36).
             if len(example["output"]) == 0:
-                num_empty_output += 1
+                discarded += 1
                 continue
-            elif example.get("input", "") != "":
-                sources.append(prompt_input.format_map(example))
-            else:
-                sources.append(prompt_no_input.format_map(example))
+            template = prompt_input if example.get("input", "") != "" else prompt_no_input
+            self.sources.append(template.format_map(example))
+            self.targets.append(f"{example['output']}{tokenizer.eos_token}")
+            names.append(example["source"])
+            self.indices.append(example.get("original_index", -1))
+            self.completion_lengths.append(example.get("completion_length", -1))
+        logger.info(f"Discarded {discarded} examples with an empty output")
 
-            targets.append(f"{example['output']}{tokenizer.eos_token}")
-            data_sources.append(example["source"])
-            all_data_sources.add(example["source"])
-            if "original_index" in example:
-                indices.append(example["original_index"])
-            else:
-                indices.append(-1)
-
-            if "weight" in example:
-                weights.append(example["weight"])
-            else:
-                weights.append(-1)
-
-            if "completion_length" in example:
-                completion_lengths.append(example["completion_length"])
-            else:
-                completion_lengths.append(-1)
-
-        print(f"Discard {num_empty_output} examples")
-
-        # Convert data source name to int
-        all_data_sources = sorted(list(all_data_sources))
-        data_source_to_num = {data_source: idx for idx, data_source in enumerate(all_data_sources)}
-        print(data_source_to_num)
-        data_sources = [data_source_to_num[data_source] for data_source in data_sources]
-
-        self.sources = sources
-        self.targets = targets
-        self.all_data_sources = all_data_sources
-        self.data_sources = data_sources
-        self.indices = indices
-        self.weights = weights
-        self.completion_lengths = completion_lengths
-        self.num_sources = len(data_source_to_num)
+        # Data source names as integers, in sorted order.
+        self.all_data_sources = sorted(set(names))
+        ids = {name: i for i, name in enumerate(self.all_data_sources)}
+        logger.info(f"Data sources: {ids}")
+        self.data_sources = [ids[name] for name in names]
+        self.num_sources = len(ids)
 
     def __len__(self):
         return len(self.sources)
-
-    def get_super_class(self, list_small, separate_large=False):
-        """
-        0: small sources
-        1-: large sources
-        """
-        assert len(list_small) > 0, "Small source needs to contain at least one data source"
-        list_super_class = []
-
-        # Create a mapping for large sources
-        large_source_idx = 1
-        large_source_idx_mapping = {}
-
-        if separate_large:
-            for source in range(self.num_sources):
-                if source not in list_small:
-                    large_source_idx_mapping[source] = large_source_idx
-                    large_source_idx += 1
-
-            print(f"Index mapping for large sources: {large_source_idx_mapping}")
-
-        for source in self.data_sources:
-            if source in list_small:
-                list_super_class.append(0)
-            elif separate_large:
-                # If separate, consider each large source separately
-                list_super_class.append(large_source_idx_mapping[source])
-            else:
-                # If not separate, consider all large sources as one
-                list_super_class.append(1)
-
-        return list_super_class
-
-    def naive__getitem__(self, i) -> dict[str, torch.Tensor]:
-        return dict(
-            input_ids=self.sources[i],
-            labels=self.targets[i],
-            sources=self.data_sources[i],
-            indices=self.indices[i],
-            weights=self.weights[i],
-            completion_lengths=self.completion_lengths[i],
-        )
 
     def __getitem__(self, i):
         return dict(
@@ -528,133 +414,90 @@ class SupervisedDataset(Dataset):
             labels=self.targets[i],
             sources=self.data_sources[i],
             indices=self.indices[i],
-            weights=self.weights[i],
             completion_lengths=self.completion_lengths[i],
         )
 
 
 @dataclass
-class DataCollatorForSupervisedDataset:
-    """Collate examples for supervised fine-tuning."""
+class SupervisedCollator:
+    """Tokenise prompt / completion strings and pad them into a batch.
+
+    The batch carries `input_ids`, `labels` (-100 on the prompt), `attention_mask` and the
+    per-example `colm_meta` (source, original index, completion length).
+    `legacy` (upstream errors E4a, E15): the prompt and the completion are tokenised together, so
+    a token can straddle their boundary (9% of the examples) and the prompt is masked by the
+    length of its separate tokenisation, and the attention mask is `input_ids != pad_token_id`.
+    """
 
     tokenizer: transformers.PreTrainedTokenizer
+    legacy: bool = False
 
-    def naive__call__(self, instances: Sequence[dict]) -> dict[str, torch.Tensor]:
-        input_ids, labels = tuple(
-            [instance[key] for instance in instances] for key in ("input_ids", "labels")
+    def _tokenize(self, prompts, completions):
+        tok, max_length = self.tokenizer, self.tokenizer.model_max_length
+        if self.legacy:
+            joint = tok(
+                [p + c for p, c in zip(prompts, completions)],
+                truncation=True,
+                max_length=max_length,
+            )
+            prompt_ids = tok(prompts, truncation=True, max_length=max_length)["input_ids"]
+            ids = [torch.tensor(x) for x in joint["input_ids"]]
+            labels = [x.clone() for x in ids]
+            for label, prompt in zip(labels, prompt_ids):
+                label[: len(prompt)] = IGNORE_INDEX
+            return ids, labels
+        prompt_ids = tok(prompts)["input_ids"]
+        completion_ids = tok(completions, add_special_tokens=False)["input_ids"]
+        ids, labels = [], []
+        for p, c in zip(prompt_ids, completion_ids):
+            ids.append(torch.tensor((p + c)[:max_length]))
+            labels.append(torch.tensor(([IGNORE_INDEX] * len(p) + c)[:max_length]))
+        return ids, labels
+
+    def __call__(self, instances: Sequence[dict]) -> dict:
+        ids, labels = self._tokenize(
+            [i["input_ids"] for i in instances], [i["labels"] for i in instances]
         )
-        input_ids = torch.nn.utils.rnn.pad_sequence(
-            input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id
-        )
+        pad = self.tokenizer.pad_token_id
+        input_ids = torch.nn.utils.rnn.pad_sequence(ids, batch_first=True, padding_value=pad)
         labels = torch.nn.utils.rnn.pad_sequence(
             labels, batch_first=True, padding_value=IGNORE_INDEX
         )
-
+        if self.legacy:
+            attention_mask = input_ids.ne(pad)
+        else:
+            lengths = torch.tensor([len(x) for x in ids])
+            attention_mask = (torch.arange(input_ids.shape[1]) < lengths[:, None]).long()
+        meta = {
+            "sources": torch.tensor([i["sources"] for i in instances]),
+            "indices": torch.tensor([i["indices"] for i in instances]),
+            "completion_lengths": torch.tensor([i["completion_lengths"] for i in instances]),
+        }
         return dict(
-            input_ids=input_ids,
-            labels=labels,
-            attention_mask=input_ids.ne(self.tokenizer.pad_token_id),
+            input_ids=input_ids, labels=labels, attention_mask=attention_mask, colm_meta=meta
         )
 
-    def __call__(self, instances: Sequence[dict]) -> dict[str, torch.Tensor]:
-        sources = []
-        targets = []
 
-        for instance in instances:
-            source = instance["input_ids"]
-            target = instance["labels"]
-            sources.append(source)
-            targets.append(target)
-
-        data_dict = preprocess(sources, targets, self.tokenizer)
-        input_ids, labels = data_dict["input_ids"], data_dict["labels"]
-        # input_ids, labels = tuple([instance[key] for instance in instances] for key in ("input_ids", "labels"))
-        input_ids = torch.nn.utils.rnn.pad_sequence(
-            input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id
-        )
-        labels = torch.nn.utils.rnn.pad_sequence(
-            labels, batch_first=True, padding_value=IGNORE_INDEX
-        )
-
-        return dict(
-            input_ids=input_ids,
-            labels=labels,
-            attention_mask=input_ids.ne(self.tokenizer.pad_token_id),
-        )
+def make_collator(args, tokenizer):
+    """The collator of a MathInstruct-style run: pools for coreset training, batches otherwise."""
+    collate = SupervisedCollator(tokenizer, legacy=args.legacy)
+    return PoolCollator(collate, args.micro_batch_size) if args.coreset else collate
 
 
 @dataclass
-class DataCollatorForSupervisedDatasetWithSource:
-    """Collate examples for supervised fine-tuning."""
+class PoolCollator:
+    """One selection pool (all examples of an optimizer step) as a list of micro-batches."""
 
-    tokenizer: transformers.PreTrainedTokenizer
+    collate: SupervisedCollator
+    micro_batch_size: int
 
-    def naive__call__(self, instances: Sequence[dict]) -> dict[str, torch.Tensor]:
-        input_ids, labels = tuple(
-            [instance[key] for instance in instances] for key in ("input_ids", "labels")
-        )
-        input_ids = torch.nn.utils.rnn.pad_sequence(
-            input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id
-        )
-        labels = torch.nn.utils.rnn.pad_sequence(
-            labels, batch_first=True, padding_value=IGNORE_INDEX
-        )
-        data_sources = []
-        indices = []
-        weights = []
-        completion_lengths = []
-
-        for instance in instances:
-            data_sources.append(instance["sources"])
-            indices.append(instance["indices"])
-            weights.append(instance["weights"])
-            completion_lengths.append(instance["completion_lengths"])
-
-        return dict(
-            input_ids=input_ids,
-            labels=labels,
-            attention_mask=input_ids.ne(self.tokenizer.pad_token_id),
-            sources=data_sources,
-            indices=indices,
-            weights=weights,
-            completion_lengths=completion_lengths,
-        )
-
-    def __call__(self, instances: Sequence[dict]) -> dict[str, torch.Tensor]:
-        sources = []
-        targets = []
-        data_sources = []
-        indices = []
-        weights = []
-        completion_lengths = []
-
-        for instance in instances:
-            sources.append(instance["input_ids"])
-            targets.append(instance["labels"])
-            data_sources.append(instance["sources"])
-            indices.append(instance["indices"])
-            weights.append(instance["weights"])
-            completion_lengths.append(instance["completion_lengths"])
-
-        data_dict = preprocess(sources, targets, self.tokenizer)
-        input_ids, labels = data_dict["input_ids"], data_dict["labels"]
-        # input_ids, labels = tuple([instance[key] for instance in instances] for key in ("input_ids", "labels"))
-        input_ids = torch.nn.utils.rnn.pad_sequence(
-            input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id
-        )
-        labels = torch.nn.utils.rnn.pad_sequence(
-            labels, batch_first=True, padding_value=IGNORE_INDEX
-        )
-
-        return dict(
-            input_ids=input_ids,
-            labels=labels,
-            attention_mask=input_ids.ne(self.tokenizer.pad_token_id),
-            sources=data_sources,
-            indices=indices,
-            weights=weights,
-            completion_lengths=completion_lengths,
-        )
+    def __call__(self, instances: Sequence[dict]) -> dict:
+        n = self.micro_batch_size
+        return {
+            "micro_batches": [
+                self.collate(instances[i : i + n]) for i in range(0, len(instances), n)
+            ]
+        }
 
 
 def concat_messages(messages, tokenizer):
@@ -743,188 +586,3 @@ def encode_with_messages_format_with_llama2_chat(example, tokenizer, max_seq_len
         "labels": labels.flatten(),
         "attention_mask": attention_mask.flatten(),
     }
-
-
-class HFDataset(Dataset):
-    def __init__(self, data):
-        self.data = data
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        return self.data[idx]
-
-
-def convert_superglue_to_hf_source(
-    samples,
-    task,
-    tokenizer,
-    max_length,
-    max_new_tokens,
-    non_diff,
-    train_as_classification,
-    only_train_option,
-):
-    """
-    Convert samples to HF-compatible dataset
-    """
-    data = []
-
-    for sample in tqdm(samples, mininterval=10):
-        encoded_candidates, option_lens = utils.encode_prompt(
-            task,
-            task.get_template(),
-            [],
-            sample,
-            tokenizer,
-            max_length=max_length,
-            generation=task.generation,
-            generation_with_gold=True,
-            max_new_tokens=max_new_tokens,
-        )
-        if task.generation:
-            correct_candidate_id = 0
-        elif isinstance(sample.correct_candidate, list):
-            correct_candidate_id = sample.candidates.index(sample.correct_candidate[0])
-        else:
-            correct_candidate_id = sample.candidates.index(sample.correct_candidate)
-
-        if non_diff:
-            # For non-differentiable objective, there is no teacher forcing thus the
-            # current answer part is removed
-            encoded_candidates[correct_candidate_id] = encoded_candidates[correct_candidate_id][
-                : -option_lens[correct_candidate_id]
-            ]
-
-        if train_as_classification:
-            # For classification, we provide the label as the correct candidate id
-            data.append(
-                [
-                    {
-                        "input_ids": encoded_candidates[_i],
-                        "labels": correct_candidate_id,
-                        "option_len": option_lens[_i],
-                        "num_options": len(sample.candidates),
-                        "sources": sample.data["source"],
-                    }
-                    for _i in range(len(encoded_candidates))
-                ]
-            )
-        elif only_train_option:
-            # Otherwise, it is just LM-style teacher forcing
-            if non_diff:
-                # For non-differentiable objective, we need to provide the gold answer to calculate F1/acc
-                data.append(
-                    {
-                        "input_ids": encoded_candidates[correct_candidate_id],
-                        "labels": encoded_candidates[correct_candidate_id],
-                        "option_len": option_lens[correct_candidate_id],
-                        "gold": sample.correct_candidate,
-                        "sources": sample.data["source"],
-                    }
-                )
-            else:
-                data.append(
-                    {
-                        "input_ids": encoded_candidates[correct_candidate_id],
-                        "labels": encoded_candidates[correct_candidate_id],
-                        "option_len": option_lens[correct_candidate_id],
-                        "sources": sample.data["source"],
-                    }
-                )
-        else:
-            data.append(
-                {
-                    "input_ids": encoded_candidates[correct_candidate_id],
-                    "labels": encoded_candidates[correct_candidate_id],
-                    "sources": sample.data["source"],
-                }
-            )
-
-    return data
-
-
-def convert_superglue_to_hf(
-    samples,
-    task,
-    tokenizer,
-    max_length,
-    max_new_tokens,
-    non_diff,
-    train_as_classification,
-    only_train_option,
-):
-    """
-    Convert samples to HF-compatible dataset
-    """
-    data = []
-
-    for sample in tqdm(samples, mininterval=10):
-        encoded_candidates, option_lens = utils.encode_prompt(
-            task,
-            task.get_template(),
-            [],
-            sample,
-            tokenizer,
-            max_length=max_length,
-            generation=task.generation,
-            generation_with_gold=True,
-            max_new_tokens=max_new_tokens,
-        )
-        if task.generation:
-            correct_candidate_id = 0
-        elif isinstance(sample.correct_candidate, list):
-            correct_candidate_id = sample.candidates.index(sample.correct_candidate[0])
-        else:
-            correct_candidate_id = sample.candidates.index(sample.correct_candidate)
-
-        if non_diff:
-            # For non-differentiable objective, there is no teacher forcing thus the
-            # current answer part is removed
-            encoded_candidates[correct_candidate_id] = encoded_candidates[correct_candidate_id][
-                : -option_lens[correct_candidate_id]
-            ]
-
-        if train_as_classification:
-            # For classification, we provide the label as the correct candidate id
-            data.append(
-                [
-                    {
-                        "input_ids": encoded_candidates[_i],
-                        "labels": correct_candidate_id,
-                        "option_len": option_lens[_i],
-                        "num_options": len(sample.candidates),
-                    }
-                    for _i in range(len(encoded_candidates))
-                ]
-            )
-        elif only_train_option:
-            # Otherwise, it is just LM-style teacher forcing
-            if non_diff:
-                # For non-differentiable objective, we need to provide the gold answer to calculate F1/acc
-                data.append(
-                    {
-                        "input_ids": encoded_candidates[correct_candidate_id],
-                        "labels": encoded_candidates[correct_candidate_id],
-                        "option_len": option_lens[correct_candidate_id],
-                        "gold": sample.correct_candidate,
-                    }
-                )
-            else:
-                data.append(
-                    {
-                        "input_ids": encoded_candidates[correct_candidate_id],
-                        "labels": encoded_candidates[correct_candidate_id],
-                        "option_len": option_lens[correct_candidate_id],
-                    }
-                )
-        else:
-            data.append(
-                {
-                    "input_ids": encoded_candidates[correct_candidate_id],
-                    "labels": encoded_candidates[correct_candidate_id],
-                }
-            )
-
-    return data

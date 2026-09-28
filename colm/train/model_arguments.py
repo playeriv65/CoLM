@@ -1,4 +1,7 @@
 from dataclasses import dataclass, field
+from typing import Literal
+
+from colm.train.literals import check_literals
 
 
 @dataclass
@@ -30,20 +33,16 @@ class ModelArguments:
     attn_implementation: str = field(
         default="sdpa", metadata={"help": "Attention kernel: sdpa, eager, flash_attention_2."}
     )
-    torch_dtype: str = field(
+    torch_dtype: Literal["auto", "bfloat16", "float16", "float32", "none"] = field(
         default="none",
-        metadata={
-            "help": "Load dtype of the base weights; 'none' means float32.",
-            "choices": ["auto", "bfloat16", "float16", "float32", "none"],
-        },
+        metadata={"help": "Load dtype of the base weights; 'none' means float32."},
     )
-    precision: str = field(
+    precision: Literal["auto", "fp32", "explicit"] = field(
         default="auto",
         metadata={
-            "help": "auto: fp16 AMP over fp32 weights for phi-2/Llama-2, bf16 weights + bf16 AMP "
-            "otherwise (the paper recipe); fp32: no mixed precision; explicit: keep the "
-            "fp16/bf16/torch_dtype flags as given.",
-            "choices": ["auto", "fp32", "explicit"],
+            "help": "auto: the precision of the recipe of the model (configs/model_profiles.json: "
+            "fp16 AMP over fp32 weights or bf16); fp32: no mixed precision; explicit: keep the "
+            "fp16/bf16/torch_dtype flags as given."
         },
     )
     lora: bool = field(default=True, metadata={"help": "Whether to use LoRA."})
@@ -54,6 +53,9 @@ class ModelArguments:
         default_factory=list, metadata={"help": "LoRA target modules (inferred if empty)."}
     )
     enable_dropout: bool = field(default=True, metadata={"help": "Keep the model's dropout."})
+
+    def __post_init__(self):
+        check_literals(self)
 
 
 def add_padding_to_tokenizer(tokenizer):

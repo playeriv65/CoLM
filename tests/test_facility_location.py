@@ -1,8 +1,9 @@
 import numpy as np
 import pytest
 import torch
+from equivalence.golden import assert_same, load
 
-from colm.train.facility_location import get_orders_and_weights, similarity
+from colm.selection.facility_location import get_orders_and_weights, similarity
 
 
 @pytest.mark.parametrize("metric", ["l1", "euclidean", "cosine"])
@@ -43,5 +44,21 @@ def test_facility_location_picks_cluster_representatives():
 
 def test_similarity_handles_nan():
     X = torch.tensor([[1.0, 0.0], [float("nan"), 1.0], [0.0, 1.0]])
-    S, _ = similarity(X, "cosine")
-    assert not np.isnan(S).any()
+    assert not np.isnan(similarity(X, "cosine")).any()
+
+
+def test_matches_pre_refactor_golden():
+    """Orders and weights of the pre-refactor implementation, ties included."""
+    for case in load("fl"):
+        y = None if case["y"] is None else case["y"].numpy()
+        order, weights = get_orders_and_weights(
+            12,
+            case["X"],
+            case["metric"],
+            y=y,
+            per_class_start=case["start"],
+            strategy=case["strategy"],
+        )
+        tag = f"{case['name']}/{case['metric']}/{case['strategy']}/{case['start']}"
+        assert_same(torch.from_numpy(order.astype(np.int64)), case["order"], tag)
+        assert_same(torch.from_numpy(weights), case["weights"], tag)

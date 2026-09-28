@@ -1,0 +1,6 @@
+{
+    "_doc": "Recipe per transformers model_type: LoRA target modules and the precision of the paper recipe. `fp16_amp` = fp32 weights with fp16 autocast (torch_dtype float32); `bf16` = bf16 weights with bf16 autocast. Model types that are not listed use `default`.",
+    "phi": {"lora_target_modules": ["q_proj", "k_proj", "v_proj", "fc1", "fc2"], "precision": "fp16_amp"},
+    "llama": {"lora_target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"], "precision": "fp16_amp"},
+    "default": {"lora_target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"], "precision": "bf16"}
+}
