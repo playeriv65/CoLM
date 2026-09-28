@@ -38,3 +38,8 @@ tokens, W&B keys or machine-private data.
   logged CoLM loss is divided by `small_batch_ratio`; `torch.manual_seed(zo_random_seed)` is
   re-applied on every MeZO estimate (same z every step); per-sample MeZO loss averages over the
   padded length; base weights are fp32 with fp16 AMP for phi-2 (`torch_dtype=none`).
+
+## Optimisation work
+
+- Backlog, findings and open decisions: `docs/optimization-backlog.md`. Read it before touching
+  the selection path; update item status there when an item lands or is measured.
