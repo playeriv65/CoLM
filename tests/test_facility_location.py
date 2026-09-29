@@ -1,7 +1,6 @@
 import numpy as np
 import pytest
 import torch
-from equivalence.golden import assert_same, load
 
 from colm.selection.facility_location import get_orders_and_weights, similarity
 
@@ -47,18 +46,21 @@ def test_similarity_handles_nan():
     assert not np.isnan(similarity(X, "cosine")).any()
 
 
-def test_matches_pre_refactor_golden():
-    """Orders and weights of the pre-refactor implementation, ties included."""
-    for case in load("fl"):
-        y = None if case["y"] is None else case["y"].numpy()
-        order, weights = get_orders_and_weights(
-            12,
-            case["X"],
-            case["metric"],
-            y=y,
-            per_class_start=case["start"],
-            strategy=case["strategy"],
-        )
-        tag = f"{case['name']}/{case['metric']}/{case['strategy']}/{case['start']}"
-        assert_same(torch.from_numpy(order.astype(np.int64)), case["order"], tag)
-        assert_same(torch.from_numpy(weights), case["weights"], tag)
+def _cluster_sizes_reference(S, orders):
+    """The upstream loop: every example is represented by the most similar selected one."""
+    weights = np.zeros(len(orders), dtype=np.float32)
+    for i in range(len(S)):
+        if i in orders:
+            weights[np.where(orders == i)[0][0]] += 1
+        else:
+            weights[np.argmax(S[i, orders])] += 1
+    return weights
+
+
+@pytest.mark.parametrize("integers", [False, True])  # integers: many exactly equal distances
+def test_cluster_sizes_match_the_reference_loop(integers):
+    rng = np.random.default_rng(3)
+    X = rng.integers(0, 3, size=(30, 4)) if integers else rng.normal(size=(30, 4))
+    X = torch.from_numpy(X.astype(np.float32))
+    order, weights = get_orders_and_weights(8, X, "l1", strategy="none")
+    np.testing.assert_array_equal(weights, _cluster_sizes_reference(similarity(X, "l1"), order))

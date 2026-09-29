@@ -32,8 +32,8 @@ def run(case: str, data: str, out: str, gas_scale: int = 1, steps: int = 2) -> d
     trained, reduces = [], []
     make = trainer.batching.train_batches
 
-    def sub_batches(examples, weights, size):
-        out = make(examples, weights, size)
+    def sub_batches(examples, weights):
+        out = make(examples, weights)
         for batch, _ in out:
             trained.append(
                 {

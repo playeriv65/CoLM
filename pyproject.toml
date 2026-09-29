@@ -61,8 +61,6 @@ extend-exclude = ["math_eval/dataset"]
 select = ["E", "F", "W", "I", "B", "UP"]
 ignore = ["E501", "B905"]
 
-[tool.ruff.lint.per-file-ignores]
-"tests/equivalence/generate_golden.py" = ["B023"]  # closures over the loop variables of one-shot recording
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

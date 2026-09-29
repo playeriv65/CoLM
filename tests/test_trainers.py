@@ -15,8 +15,8 @@ def _record(trainer, monkeypatch):
     trained = []
     train_batches = trainer.batching.train_batches
 
-    def record(examples, weights, size):
-        out = train_batches(examples, weights, size)
+    def record(examples, weights):
+        out = train_batches(examples, weights)
         step = trainer.state.global_step
         for batch, weight in out:
             trained.append((step, batch["colm_meta"]["indices"].tolist(), weight))
@@ -47,10 +47,7 @@ def _losses(trainer):
     return [h["loss"] for h in trainer.state.log_history if "loss" in h]
 
 
-@pytest.mark.parametrize("legacy", [False, True])
-def test_efficient_trainer_selects_and_trains(
-    tmp_path, tokenizer, mixture_file, monkeypatch, legacy
-):
+def test_efficient_trainer_selects_and_trains(tmp_path, tokenizer, mixture_file, monkeypatch):
     wandb_loaded_before = "wandb" in sys.modules
     bs, gas, ratio = 4, 2, 0.5
     args = make_args(
@@ -61,7 +58,6 @@ def test_efficient_trainer_selects_and_trains(
         efficient_mezo=True,
         keep_sources="0",
         max_steps=MAX_STEPS,
-        legacy=legacy,
     )
     # The pool (bs * gas examples) is one Hugging Face batch.
     assert (args.per_device_train_batch_size, args.gradient_accumulation_steps) == (bs * gas, 1)
@@ -76,8 +72,7 @@ def test_efficient_trainer_selects_and_trains(
     new_bs = int(bs * ratio)
     for step in range(MAX_STEPS):
         step_batches = [t for t in trained if t[0] == step]
-        if legacy:  # micro-batches of new_bs padded examples; otherwise packs of a token budget
-            assert [len(t[1]) for t in step_batches] == [new_bs] * gas
+        assert 1 <= len(step_batches)  # packs of a token budget
         picked = [i for t in step_batches for i in t[1]]
         assert len(picked) == len(set(picked)) == gas * new_bs
         # Every example of a kept source (id 0 = every 4th example) is trained on.
@@ -136,14 +131,13 @@ def test_custom_trainer_full_batch(tmp_path, tokenizer, mixture_file):
     assert len(list((tmp_path / "indices").iterdir())) == MAX_STEPS * 2
 
 
-def _extract(tmp_path, tokenizer, mixture_file, legacy):
+def _extract(tmp_path, tokenizer, mixture_file):
     args = make_args(
         tmp_path,
         per_device_train_batch_size=4,
         gradient_accumulation_steps=2,
         efficient_mezo=True,
         keep_sources="",
-        legacy=legacy,
     )
     trainer, model = build(args, tokenizer, mixture_file)
     inputs = next(iter(trainer.get_train_dataloader()))
@@ -151,22 +145,17 @@ def _extract(tmp_path, tokenizer, mixture_file, legacy):
     return trainer, model, trainer._prepare_inputs(trainer.batching.feature_batches(inputs)[0])
 
 
-@pytest.mark.parametrize("legacy", [False, True])
-def test_estimate_and_the_two_rng_streams(tmp_path, tokenizer, mixture_file, legacy):
-    """The estimate does not move the parameters (E-drift) nor the training RNG (E3)."""
-    trainer, model, batch = _extract(tmp_path, tokenizer, mixture_file, legacy)
+def test_estimate_and_the_two_rng_streams(tmp_path, tokenizer, mixture_file):
+    """The estimate moves neither the parameters (E-drift) nor the training RNG (E3)."""
+    trainer, model, batch = _extract(tmp_path, tokenizer, mixture_file)
     before = lora_state(model)
     torch.manual_seed(0)
     state = torch.get_rng_state()
     features = trainer.extractor.extract(batch)
     assert torch.isfinite(features).all()
     after = lora_state(model)
-    drift = max(float((before[n] - after[n]).abs().max()) for n in before)
-    same_rng = torch.equal(torch.get_rng_state(), state)
-    if legacy:  # in-place shifts leave rounding drift; the global RNG is reseeded
-        assert not same_rng and drift < 1e-12
-    else:
-        assert same_rng and drift == 0
+    assert all(torch.equal(before[n], after[n]) for n in before)
+    assert torch.equal(torch.get_rng_state(), state)
 
 
 def test_logged_loss_is_the_token_mean_of_the_step(tmp_path, tokenizer, mixture_file, monkeypatch):
@@ -184,9 +173,9 @@ def test_logged_loss_is_the_token_mean_of_the_step(tmp_path, tokenizer, mixture_
     trained = []
     train_batches = trainer.batching.train_batches
 
-    def record(examples, weights, size):
+    def record(examples, weights):
         trained.extend(examples)
-        return train_batches(examples, weights, size)
+        return train_batches(examples, weights)
 
     monkeypatch.setattr(trainer.batching, "train_batches", record)
     trainer.train()
@@ -207,42 +196,13 @@ def test_logged_loss_is_the_token_mean_of_the_step(tmp_path, tokenizer, mixture_
     assert _losses(trainer)[0] == pytest.approx(expected, rel=1e-6)
 
 
-def test_logged_loss_of_the_upstream(tmp_path, tokenizer, mixture_file, monkeypatch):
-    """`legacy`: mean of the micro-batch losses, divided by small_batch_ratio (E5)."""
-    args = make_args(
-        tmp_path,
-        per_device_train_batch_size=4,
-        gradient_accumulation_steps=2,
-        efficient_mezo=True,
-        keep_sources="",
-        max_steps=1,
-        legacy=True,
-    )
-    trainer, _ = build(args, tokenizer, mixture_file)
-    micro_losses = []
-    compute_loss = trainer.compute_loss
-
-    def record(model, inputs, **kw):
-        loss = compute_loss(model, inputs, **kw)
-        if model.training:
-            micro_losses.append(float(loss.detach()))
-        return loss
-
-    monkeypatch.setattr(trainer, "compute_loss", record)
-    trainer.train()
-    mean = sum(micro_losses) / len(micro_losses)
-    assert _losses(trainer)[0] == pytest.approx(mean / args.small_batch_ratio, rel=1e-6)
-
-
-@pytest.mark.parametrize("legacy", [False, True])
-def test_trainers_run_in_both_modes(tmp_path, tokenizer, mixture_file, legacy):
+def test_trainer_runs_a_scalar_unit(tmp_path, tokenizer, mixture_file):
     args = make_args(
         tmp_path,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=8,
         data_selection_unit="length_loss_weighted",
         keep_sources="",
-        legacy=legacy,
         max_steps=1,
     )
     trainer, _ = build(args, tokenizer, mixture_file)

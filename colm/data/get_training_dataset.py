@@ -446,62 +446,25 @@ class SupervisedDataset(Dataset):
 
 @dataclass
 class SupervisedCollator:
-    """Tokenise prompt / completion strings and pad them into a batch.
-
-    The batch carries `input_ids`, `labels` (-100 on the prompt), `attention_mask` and the
-    per-example `colm_meta` (source, original index, completion length).
-    `legacy` (upstream errors E4a, E15): the prompt and the completion are tokenised together, so
-    a token can straddle their boundary (9% of the examples) and the prompt is masked by the
-    length of its separate tokenisation, and the attention mask is `input_ids != pad_token_id`.
-    """
+    """Right-padded batch of prompt / completion strings (evaluation loss): `input_ids`, `labels`
+    (-100 on the prompt), `attention_mask`; prompt and completion are tokenised separately and
+    nothing is truncated."""
 
     tokenizer: transformers.PreTrainedTokenizer
-    legacy: bool = False
-
-    def _tokenize(self, prompts, completions):
-        tok, max_length = self.tokenizer, self.tokenizer.model_max_length
-        if self.legacy:
-            joint = tok(
-                [p + c for p, c in zip(prompts, completions)],
-                truncation=True,
-                max_length=max_length,
-            )
-            prompt_ids = tok(prompts, truncation=True, max_length=max_length)["input_ids"]
-            ids = [torch.tensor(x) for x in joint["input_ids"]]
-            labels = [x.clone() for x in ids]
-            for label, prompt in zip(labels, prompt_ids):
-                label[: len(prompt)] = IGNORE_INDEX
-            return ids, labels
-        prompt_ids = tok(prompts)["input_ids"]
-        completion_ids = tok(completions, add_special_tokens=False)["input_ids"]
-        ids, labels = [], []
-        for p, c in zip(prompt_ids, completion_ids):
-            ids.append(torch.tensor((p + c)[:max_length]))
-            labels.append(torch.tensor(([IGNORE_INDEX] * len(p) + c)[:max_length]))
-        return ids, labels
 
     def __call__(self, instances: Sequence[dict]) -> dict:
-        ids, labels = self._tokenize(
-            [i["input_ids"] for i in instances], [i["labels"] for i in instances]
-        )
+        examples = tokenize_examples(self.tokenizer, instances)
         pad = self.tokenizer.pad_token_id
+        ids = [torch.from_numpy(e.input_ids) for e in examples]
         input_ids = torch.nn.utils.rnn.pad_sequence(ids, batch_first=True, padding_value=pad)
         labels = torch.nn.utils.rnn.pad_sequence(
-            labels, batch_first=True, padding_value=IGNORE_INDEX
+            [torch.from_numpy(e.labels) for e in examples],
+            batch_first=True,
+            padding_value=IGNORE_INDEX,
         )
-        if self.legacy:
-            attention_mask = input_ids.ne(pad)
-        else:
-            lengths = torch.tensor([len(x) for x in ids])
-            attention_mask = (torch.arange(input_ids.shape[1]) < lengths[:, None]).long()
-        meta = {
-            "sources": torch.tensor([i["sources"] for i in instances]),
-            "indices": torch.tensor([i["indices"] for i in instances]),
-            "completion_lengths": torch.tensor([i["completion_lengths"] for i in instances]),
-        }
-        return dict(
-            input_ids=input_ids, labels=labels, attention_mask=attention_mask, colm_meta=meta
-        )
+        lengths = torch.tensor([len(x) for x in ids])
+        attention_mask = (torch.arange(input_ids.shape[1]) < lengths[:, None]).long()
+        return dict(input_ids=input_ids, labels=labels, attention_mask=attention_mask)
 
 
 def tokenize_examples(tokenizer, instances: Sequence[dict]) -> list[Example]:
@@ -544,27 +507,8 @@ class PackCollator:
 
 def make_collator(args, tokenizer):
     """The collator of a MathInstruct-style run."""
-    if args.legacy:
-        collate = SupervisedCollator(tokenizer, legacy=True)
-        return PoolCollator(collate, args.micro_batch_size) if args.coreset else collate
     make = partial(tokenize_examples, tokenizer)
     return ExampleCollator(make) if args.coreset else PackCollator(make)
-
-
-@dataclass
-class PoolCollator:
-    """One selection pool (all examples of an optimizer step) as a list of micro-batches."""
-
-    collate: SupervisedCollator
-    micro_batch_size: int
-
-    def __call__(self, instances: Sequence[dict]) -> dict:
-        n = self.micro_batch_size
-        return {
-            "micro_batches": [
-                self.collate(instances[i : i + n]) for i in range(0, len(instances), n)
-            ]
-        }
 
 
 def concat_messages(messages, tokenizer):

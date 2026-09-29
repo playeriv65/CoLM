@@ -63,15 +63,6 @@ class TrainingArguments(HFTrainingArguments):
     wandb_entity: str | None = field(default=None, metadata={"help": "W&B entity."})
     wandb_notes: str | None = field(default=None, metadata={"help": "W&B notes."})
 
-    # --- Upstream alignment ---
-    legacy: bool = field(
-        default=False,
-        metadata={
-            "help": "Temporary bridge: reproduce the upstream CoLM behaviour, including its known "
-            "errors (docs/errors.md), for alignment runs only. Scheduled for removal."
-        },
-    )
-
     # --- Mini-batch coreset selection ---
     small_batch_ratio: float = field(
         default=0.5, metadata={"help": "Fraction of the large mini-batch that is trained on."}

@@ -39,8 +39,7 @@ are no other launch scripts: do not add shell wrappers, extend the entry points.
   last layer replayed; works for any decoder), `select.py` (`CoresetSelector`: keep sources,
   transform, Adam, coordinate mask, facility location; keeps the Adam moments),
   `facility_location.py`, `packing.py` (padding-free batches), `batching.py` (packed batching, the
-  step loss), `pool.py` (collectives that are no-ops in one process), `legacy.py` (padded upstream
-  path, temporary).
+  step loss), `pool.py` (collectives that are no-ops in one process).
 - `colm/train/attention.py` — `colm_varlen` attention for packed rows (registered with
   `AttentionInterface`; the default `attn_implementation`). `colm/train/memory.py` — peak memory
   of every rank per phase. `colm/train/step_timing.py` — opt-in per-phase step timer and its
@@ -55,18 +54,18 @@ are no other launch scripts: do not add shell wrappers, extend the entry points.
   `configs/rank_sweep/`) and `summarize.py`. Queues live in the gitignored `queues/`.
 - `math_eval/` (vLLM / HF generation; `run_open.py` takes several models/datasets per process),
   `superglue_eval/` — evaluation code behind `colm-eval`.
-- `tests/equivalence/` — the goldens of the tag `pre-refactor` (float64 CPU) and their generator.
+- `tests/equivalence/` — the tiny float64 Phi, tokenizer and data used by the tests.
 
 ## Rules
 
 - GPUs are shared and reserved per period: nothing defaults to a GPU list; pass `--gpus` / `--gpu`
   or `COLM_GPUS`. Tests run on CPU: `CUDA_VISIBLE_DEVICES="" uv run pytest -q` (includes 2- and
-  4-rank gloo runs and the golden equivalence).
+  4-rank gloo runs).
 - W&B is opt-in (`--report_to wandb`); with it off nothing may import `wandb` (tested).
 - Before committing: `uv run ruff format . && uv run ruff check . && CUDA_VISIBLE_DEVICES="" uv run pytest -q`.
-- `legacy` (`--legacy true`) exists only as a temporary bridge to align with the upstream code
-  (docs/errors.md lists what it reproduces); it is scheduled for removal, do not add new uses and
-  do not build on it. Every difference is one `if legacy:` naming the error id; the default path
+- The upstream behaviour is not kept as an option: the tag `pre-refactor` is the upstream code and
+  `legacy-bridge` the last commit with the temporary `legacy` switch and its float64 goldens
+  (`tests/test_equivalence.py`); `docs/errors.md` lists every error and its fix. The default path
   must contain no known error.
 - Exactness is float64 identity on CPU: in fp32 the MeZO feature is decided at rounding level
   (a fp32 run of the upstream code agrees with itself in 3 of 20 steps), so end-to-end fp32 runs

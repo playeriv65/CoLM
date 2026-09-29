@@ -90,9 +90,10 @@ the picks are broadcast and every rank trains on its share. The loss of a step i
 all label tokens of the examples trained in the step (all ranks). Peak GPU memory is measured on every
 rank and per phase (`memory.json`, `peak_mem_*` in the log).
 
-**Known errors of the upstream code** are fixed by default (`docs/errors.md`). The temporary switch
-`--legacy true` reproduces the upstream behaviour for alignment runs only; it is scheduled for
-removal, do not add new uses.
+**Known errors of the upstream code** are fixed (`docs/errors.md`, with the evidence). The
+alignment with the upstream behaviour was proven with a temporary `legacy` switch (float64 CPU
+goldens and a phi-2 GPU run); it has been removed again: the tag `pre-refactor` is the upstream
+code, `legacy-bridge` the last commit that still has the switch and its tests.
 
 ### Step timing
 `--profile_timing coarse|fine` (default `off`: no synchronize, no overhead) writes a per-phase

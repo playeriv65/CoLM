@@ -1,10 +1,11 @@
 # Errors of the upstream CoLM code and what was done about them
 
 Audit of the original implementation (commit `a6257b0`) and of its port to transformers 5. Every
-error listed as fixed is fixed in the default path; `--legacy true` reproduces the upstream
-behaviour and exists only to prove alignment (float64 CPU goldens of the tag `pre-refactor`,
-`tests/test_equivalence.py`). It is a temporary bridge and will be removed: each legacy branch is
-one `if legacy:` at the point of difference, named after the id below.
+error listed as fixed is fixed. To prove the alignment with the upstream behaviour the refactored
+code had a temporary `legacy` switch reproducing it (float64 CPU goldens of the tag
+`pre-refactor`, `tests/test_equivalence.py`); the switch has been removed. The tag `pre-refactor`
+is the upstream code (with the port), `legacy-bridge` the last commit that still has the switch,
+its tests and the goldens.
 
 Evidence numbers were measured on CPU (tiny Phi, real data) or on one RTX PRO 6000 (phi-2, 20
 steps, GPU 2). Severity: **R** changes results, **M** changes memory / time only.
@@ -70,9 +71,9 @@ The same pools (steps 0-7 of the upstream run, model at initialisation) through 
 fixed pipeline: correlation of the features 0.78, selected sets overlap 12.9 of 16 (random
 selection of the non-kept part: 10.2, the upstream code against itself: 13.5).
 
-## Alignment
+## Alignment (commit `legacy-bridge`)
 
-`--legacy true` against the tag `pre-refactor`: float64 CPU identity of the collated batches,
+With `legacy=True`, against the tag `pre-refactor`: float64 CPU identity of the collated batches,
 facility location (orders and weights), the selection stages (15 configurations, 5 steps each),
 the features of every unit, and 3-step trajectories (selected indices, weights, losses, LoRA
 weights to 1e-10, RNG state after selection) of every trainer. phi-2 on GPU: the selection of the

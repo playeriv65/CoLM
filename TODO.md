@@ -6,15 +6,13 @@ commit / result pointer, delete them once they are recorded in docs. Optimisatio
 
 ## In progress
 
-- [ ] Refactor branch `task/refactor` (this work): behaviour-preserving refactor with the
-      `legacy` bridge (done, goldens pass), errors fixed in the default path (`docs/errors.md`),
-      entry points and config. Remaining: merge, then **delete the `legacy` switch** (tag
-      `legacy-bridge` marks the last commit that has it) once the alignment evidence is accepted.
+- [ ] Nothing in progress: the refactor is merged (`legacy` switch removed; tags `pre-refactor`
+      and `legacy-bridge`).
 
 ## Next
 
 - [ ] LoRA rank sweep: r in {8, 16} vs the paper's 128. **Blocked** until the refactor is merged;
-      runs with the default (`legacy=False`) path, i.e. with the fixes E4 (tokenisation, no
+      runs with the fixed code, i.e. with the fixes E4 (tokenisation, no
       truncation), E8 (question-grouped held-out set) and E9 (eval scoring) in `docs/errors.md`.
       The queue was regenerated against the fixed code (`queues/rank-sweep-v2`, outputs in
       `out/rank-sweep-v2`); the pre-refactor queue `queues/rank-sweep` and `out/rank-sweep` (old

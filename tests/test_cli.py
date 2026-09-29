@@ -34,7 +34,7 @@ def test_a_plain_run_is_the_paper_recipe(tmp_path):
     assert (training.micro_batch_size, training.per_device_train_batch_size) == (4, 32)
     assert training.gradient_accumulation_steps == 1 and training.small_batch_ratio == 0.5
     assert training.keep_source_ids == [0, 1, 3, 5, 7, 8, 9, 10, 11, 13]
-    assert not training.legacy and training.report_to == [] and training.save_only_model
+    assert training.report_to == [] and training.save_only_model
     # the recipe of phi: fp16 AMP over fp32 weights, LoRA on q k v fc1 fc2
     assert training.fp16 and model.torch_dtype == "none"
     assert model.lora_target_modules == ["q_proj", "k_proj", "v_proj", "fc1", "fc2"]
@@ -78,7 +78,7 @@ def test_help_lists_every_option_and_the_gpus(tmp_path):
     finally:
         sys.stdout = old
     text = out.getvalue()
-    assert "--gpus" in text and "--max_steps" in text and "--zo_dim" in text and "--legacy" in text
+    assert "--gpus" in text and "--max_steps" in text and "--zo_dim" in text
 
 
 def test_train_needs_gpus_and_builds_one_torchrun(tmp_path, monkeypatch):

@@ -41,63 +41,38 @@ def call(module: nn.Module, overrides: dict[str, torch.Tensor] | None, *args, **
 class Perturbation:
     """theta -> theta +- eps z, z ~ N(0, I) drawn from a fixed seed (the same z for every estimate).
 
-    `legacy` (upstream errors E3, E-drift): reseed the *global* RNG for every draw and shift the
-    parameters in place (+eps, -2 eps, +eps), so the training RNG restarts from the same state
-    after every estimate and the parameters accumulate rounding error.
+    z comes from a private generator and the shifted parameters are new tensors handed to
+    `functional_call`: neither the training RNG nor the parameters are touched.
     """
 
-    def __init__(self, named_params, eps: float, seed: int, legacy: bool = False):
+    def __init__(self, named_params, eps: float, seed: int):
         self.names = [n for n, _ in named_params]
         self.params = [p for _, p in named_params]
-        self.eps, self.seed, self.legacy = eps, seed, legacy
+        self.eps, self.seed = eps, seed
         self._z = None
 
-    def _draw(self) -> list[torch.Tensor]:
-        if self.legacy:
-            torch.manual_seed(self.seed)
-            generator = None
-        else:
-            generator = torch.Generator(self.params[0].device).manual_seed(self.seed)
-        return [
-            torch.normal(0, 1, size=p.shape, device=p.device, dtype=p.dtype, generator=generator)
-            for p in self.params
-        ]
-
     def z(self) -> list[torch.Tensor]:
-        if self.legacy:
-            return self._draw()
         if self._z is None:
-            self._z = self._draw()
+            generator = torch.Generator(self.params[0].device).manual_seed(self.seed)
+            self._z = [
+                torch.normal(
+                    0, 1, size=p.shape, device=p.device, dtype=p.dtype, generator=generator
+                )
+                for p in self.params
+            ]
         return self._z
 
     def projected_grad(self, loss_fn) -> torch.Tensor:
         """(L(theta + eps z) - L(theta - eps z)) / 2 eps for `loss_fn(overrides)`."""
-        if self.legacy:
-            self._shift(1)
-            loss_plus = loss_fn(None)
-            self._shift(-2)
-            loss_minus = loss_fn(None)
-            self._shift(1)
-        else:
-            z = self.z()
-            plus = {n: p + s for n, p, s in zip(self.names, self.params, self._steps(z, 1))}
-            minus = {n: p - s for n, p, s in zip(self.names, self.params, self._steps(z, 1))}
-            loss_plus, loss_minus = loss_fn(plus), loss_fn(minus)
-        return (loss_plus - loss_minus) / (2 * self.eps)
-
-    def _steps(self, z, sign):
-        return [sign * zi * self.eps for zi in z]
-
-    def _shift(self, sign: int) -> None:
-        for p, z in zip(self.params, self._draw()):
-            p.data = p.data + sign * z * self.eps
+        steps = [z * self.eps for z in self.z()]
+        plus = {n: p + s for n, p, s in zip(self.names, self.params, steps, strict=True)}
+        minus = {n: p - s for n, p, s in zip(self.names, self.params, steps, strict=True)}
+        return (loss_fn(plus) - loss_fn(minus)) / (2 * self.eps)
 
     def features(self, g: torch.Tensor, weight_grad: bool = False) -> torch.Tensor:
         """`[n, numel]` features g_i * z (times the parameter for `mezo_selection=weight_grad`)."""
-        if self.legacy:
-            torch.manual_seed(self.seed)  # the estimate ends with a fresh draw of z
         parts = []
-        for p, z in zip(self.params, self.z()):
+        for p, z in zip(self.params, self.z(), strict=True):
             update = g.reshape(-1, 1) * z.reshape(1, -1)
             if weight_grad and not torch.all(p.data == 0):
                 update = update * p.data.reshape(1, -1)

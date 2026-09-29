@@ -294,7 +294,7 @@ def main(argv=None):
         config = json.load(f)
     model_args, data_args, eval_args = hf_parser.parse_dict(config, allow_extra_keys=True)
 
-    limit = sequence_limit(model_args, data_args, bool(config.get("legacy", False)))
+    limit = sequence_limit(model_args, data_args)
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         model_args.tokenizer_name or model_args.model_name_or_path,
         model_max_length=limit,
@@ -307,7 +307,7 @@ def main(argv=None):
         full = get_training_dataset(
             data_args.train_files,
             tokenizer=tokenizer,
-            max_seq_length=None if config.get("legacy") else limit,
+            max_seq_length=limit,
             sample_percentage=data_args.percentage,
             subset_index_files=data_args.subset_index_files,
             seed=data_args.sample_data_seed,

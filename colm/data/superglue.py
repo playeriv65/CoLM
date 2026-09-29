@@ -19,9 +19,9 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 
 import colm.data.utils as utils
-from colm.data.get_training_dataset import ExampleCollator, PackCollator, PoolCollator
+from colm.data.get_training_dataset import ExampleCollator, PackCollator
 from colm.data.tasks import Sample, get_task
-from colm.selection.packing import IGNORE_INDEX, META, Example
+from colm.selection.packing import IGNORE_INDEX, Example
 
 logger = logging.getLogger(__name__)
 
@@ -98,37 +98,6 @@ def option_examples(features: list[dict]) -> list[Example]:
 
 
 @dataclass
-class OptionCollator:
-    """Padded batch of generation-style examples (`legacy`); the labels of the prompt are -100.
-
-    Upstream error E16: the option is counted back from the padded width, so the option of a
-    shorter example loses its first tokens.
-    """
-
-    pad_token_id: int
-
-    def __call__(self, features: list[dict]) -> dict:
-        ids = [torch.tensor(f["input_ids"]) for f in features]
-        labels = [x.clone() for x in ids]
-        input_ids = pad_sequence(ids, batch_first=True, padding_value=self.pad_token_id)
-        width = input_ids.shape[1]
-        for row, f in zip(labels, features, strict=True):
-            if "option_len" in f:
-                row[: width - f["option_len"]] = IGNORE_INDEX
-        lengths = torch.tensor([len(x) for x in ids])
-        return {
-            "input_ids": input_ids,
-            "labels": pad_sequence(labels, batch_first=True, padding_value=IGNORE_INDEX),
-            "attention_mask": (torch.arange(width) < lengths[:, None]).long(),
-            META: {
-                "sources": torch.tensor([int(f["sources"]) for f in features]),
-                "indices": torch.tensor([f["indices"] for f in features]),
-                "completion_lengths": torch.tensor([f.get("option_len", -1) for f in features]),
-            },
-        }
-
-
-@dataclass
 class ClassificationCollator:
     """Candidates of several examples as one padded batch (`num_options` says how they group)."""
 
@@ -148,18 +117,18 @@ class ClassificationCollator:
         }
 
 
-def classification_loss(logits, batch, legacy=False) -> torch.Tensor:
+def classification_loss(logits, batch) -> torch.Tensor:
     """Cross-entropy over the candidates of each example, scored by their mean option log-probability.
 
-    `legacy` (upstream error E16): the option is counted back from the padded width.
+    The option is the last `option_len` real tokens of a candidate (the upstream code counted them
+    back from the padded width, so the option of a shorter candidate lost its first tokens).
     """
     input_ids, mask = batch["input_ids"], batch["attention_mask"]
     targets = input_ids[:, 1:]
     positions = torch.arange(targets.shape[1], device=targets.device)
     real = mask.sum(dim=1, keepdim=True)
-    end = torch.full_like(real, input_ids.shape[1]) if legacy else real
     option_len = batch["option_len"].unsqueeze(1)
-    keep = (positions >= end - 1 - option_len) & (positions < real - 1)
+    keep = (positions >= real - 1 - option_len) & (positions < real - 1)
     log_probs = F.log_softmax(logits[:, :-1], dim=-1)
     picked = torch.gather(log_probs, -1, targets.unsqueeze(-1)).squeeze(-1)
     score = (picked * keep).sum(-1) / keep.sum(-1)  # one number per candidate
@@ -198,10 +167,5 @@ def build_superglue(model_args, data_args, training_args, tokenizer):
             raise ValueError("classification tasks train with data_selection_method=none only")
         collator = ClassificationCollator(tokenizer.pad_token_id)
     else:
-        if training_args.legacy:
-            collator = OptionCollator(tokenizer.pad_token_id)
-            if training_args.coreset:
-                collator = PoolCollator(collator, training_args.micro_batch_size)
-        else:
-            collator = (ExampleCollator if training_args.coreset else PackCollator)(option_examples)
+        collator = (ExampleCollator if training_args.coreset else PackCollator)(option_examples)
     return ListDataset(data), collator, None

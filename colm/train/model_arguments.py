@@ -30,8 +30,7 @@ class ModelArguments:
     attn_implementation: str | None = field(
         default=None,
         metadata={
-            "help": "Attention kernel. Default: `colm_varlen` (packed inputs, colm/train/attention.py); "
-            "`sdpa` with `legacy` (padded batches)."
+            "help": "Attention kernel. Default: `colm_varlen` (packed inputs, colm/train/attention.py)."
         },
     )
     torch_dtype: Literal["auto", "bfloat16", "float16", "float32", "none"] = field(

@@ -46,8 +46,7 @@ def trainer_class(args):
 
 
 def build(args, tok, data, lora_dropout=0.0, model=None):
-    attn = "sdpa" if args.legacy else attention.register()
-    model = model or model_fp64(tok, lora_dropout=lora_dropout, attn=attn)
+    model = model or model_fp64(tok, lora_dropout=lora_dropout, attn=attention.register())
     dataset = get_training_dataset([data], tokenizer=tok, max_seq_length=512)
     trainer = trainer_class(args)(
         model=model,

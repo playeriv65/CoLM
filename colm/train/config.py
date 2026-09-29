@@ -23,18 +23,13 @@ PROFILES_FILE = os.path.join(
 DATACLASSES = (ModelArguments, DataArguments, TrainingArguments, HeldoutEvalArguments)
 
 
-LEGACY_MAX_LENGTH = 512  # where the upstream code cut every example
+def sequence_limit(model_args: ModelArguments, data_args: DataArguments) -> int:
+    """Tokens a training example may have: the context window of the model (or `max_seq_length`).
 
-
-def sequence_limit(model_args: ModelArguments, data_args: DataArguments, legacy: bool) -> int:
-    """Tokens a training example may have: the context window of the model.
-
-    Examples above it are dropped, never truncated. `legacy` (upstream error E4b): cut at 512.
+    Examples above it are dropped, never truncated (the upstream code cut every example at 512).
     """
     if data_args.max_seq_length:
         return data_args.max_seq_length
-    if legacy:
-        return LEGACY_MAX_LENGTH
     config = AutoConfig.from_pretrained(
         model_args.config_name or model_args.model_name_or_path, cache_dir=model_args.cache_dir
     )

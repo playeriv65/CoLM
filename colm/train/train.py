@@ -91,8 +91,7 @@ def build_model(model_args, training_args, tokenizer):
         trust_remote_code=model_args.trust_remote_code,
         cache_dir=model_args.cache_dir,
         revision=model_args.model_revision,
-        attn_implementation=model_args.attn_implementation
-        or ("sdpa" if training_args.legacy else attention.register()),
+        attn_implementation=model_args.attn_implementation or attention.register(),
     )
     if not model_args.enable_dropout:
         logger.info("Set dropout to 0")
@@ -124,17 +123,11 @@ def build_model(model_args, training_args, tokenizer):
             modules_to_save=modules_to_save,
         )
         model = get_peft_model(model, lora_config)
-        if training_args.legacy:
-            # Upstream (peft issue 341 workaround): the embedding and head weights are upcast to
-            # fp32 unconditionally, although only trainable fp16 parameters need it.
-            base = model.get_base_model()
-            base.model.embed_tokens.weight.data = base.model.embed_tokens.weight.data.float()
-            base.lm_head.weight.data = base.lm_head.weight.data.float()
-        else:
-            # The fp16 gradient scaler cannot unscale fp16 parameters: trainable ones are fp32.
-            for p in model.parameters():
-                if p.requires_grad and p.dtype in (torch.float16, torch.bfloat16):
-                    p.data = p.data.float()
+        # The fp16 gradient scaler cannot unscale fp16 parameters: trainable ones are fp32 (the
+        # upstream code upcast the embedding and the head unconditionally instead).
+        for p in model.parameters():
+            if p.requires_grad and p.dtype in (torch.float16, torch.bfloat16):
+                p.data = p.data.float()
         model.print_trainable_parameters()
         model.enable_input_require_grads()
     if training_args.should_log:
@@ -151,7 +144,7 @@ def build_data(model_args, data_args, training_args, eval_args, tokenizer, limit
     dataset = get_training_dataset(
         data_args.train_files,
         tokenizer=tokenizer,
-        max_seq_length=None if training_args.legacy else limit,
+        max_seq_length=limit,
         sample_percentage=data_args.percentage,
         subset_index_files=data_args.subset_index_files,
         seed=data_args.sample_data_seed,
@@ -205,12 +198,12 @@ def main(argv=None):
     transformers.utils.logging.set_verbosity(log_level)
     logger.warning(
         f"rank {training_args.process_index}/{training_args.world_size}, device {training_args.device}, "
-        f"fp16 {training_args.fp16}, bf16 {training_args.bf16}, legacy {training_args.legacy}"
+        f"fp16 {training_args.fp16}, bf16 {training_args.bf16}"
     )
     logger.info(f"{training_args}\n{model_args}\n{data_args}")
 
     set_seed(training_args.seed)
-    limit = sequence_limit(model_args, data_args, training_args.legacy)
+    limit = sequence_limit(model_args, data_args)
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.tokenizer_name or model_args.model_name_or_path,
         model_max_length=limit,

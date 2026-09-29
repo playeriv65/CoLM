@@ -11,7 +11,6 @@ from colm.data.get_training_dataset import ExampleCollator
 from colm.data.superglue import (
     ClassificationCollator,
     ListDataset,
-    OptionCollator,
     classification_loss,
     option_examples,
 )
@@ -35,9 +34,6 @@ def test_option_examples_mask_the_prompt(tokenizer):
         examples[0].labels[-2:].tolist() == short[-2:] and (examples[0].labels[:-2] == -100).all()
     )
     assert [e.source for e in examples] == [1, 2] and examples[1].completion_length == 3
-    # legacy (E16): counted back from the padded width, the shorter example loses tokens
-    padded = OptionCollator(tokenizer.pad_token_id)(features)["labels"]
-    assert (padded[0] != -100).sum() < 2 and (padded[1] != -100).sum() == 3
 
 
 def _candidates(tokenizer, texts, option_len, label):
@@ -62,7 +58,6 @@ def test_classification_loss_matches_a_per_candidate_computation(tokenizer, phi)
     with torch.no_grad():
         logits = phi(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]).logits
         loss = classification_loss(logits, batch)
-        legacy = classification_loss(logits, batch, legacy=True)
 
         scores, row = [], 0
         for example in features:
@@ -76,7 +71,6 @@ def test_classification_loss_matches_a_per_candidate_computation(tokenizer, phi)
             scores.append((torch.stack(per), example[0]["labels"]))
     expected = torch.stack([F.cross_entropy(s[None], torch.tensor([y])) for s, y in scores]).mean()
     torch.testing.assert_close(loss, expected, rtol=1e-5, atol=1e-6)
-    assert not torch.allclose(loss, legacy)  # the padded candidates change the legacy value
 
 
 def test_classification_baseline_trains(tmp_path, tokenizer):
