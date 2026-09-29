@@ -84,12 +84,12 @@ def test_queue_order_and_contents(repo):
     assert (config["lora_r"], config["lora_alpha"], config["output_dir"]) == (
         16,
         64,
-        "out/rank-sweep/phi-2-r16-a64-1024steps-seed0",
+        "out/rank-sweep-v2/phi-2-r16-a64-1024steps-seed0",
     )
     assert config["seed"] == 0 and config["max_steps"] == 1024 and config["holdout_size"] == 1000
     acc = jobs["003-evalacc-r128-a512.json"]
     assert "--use_vllm" in acc["argv"] and "--enable_lora" in acc["argv"]
-    assert acc["argv"].count("out/rank-sweep/phi-2-r128-a512-1024steps-seed0/checkpoint-512") == 1
+    assert acc["argv"].count("out/rank-sweep-v2/phi-2-r128-a512-1024steps-seed0/checkpoint-512") == 1
     assert jobs["017-summary.json"]["gpu"] is False
     assert acc["argv"][acc["argv"].index("--gpu_memory_utilization") + 1] == "0.9"
     base_acc = jobs["016-evalacc-base.json"]
@@ -119,7 +119,7 @@ def test_generated_queue_dry_runs_through_the_worker(repo, capsys):
     out = capsys.readouterr().out
     assert out.count("CUDA_VISIBLE_DEVICES=0") == 17 and "18 pending jobs" in out
     assert (
-        "colm.train.train out/rank-sweep/phi-2-r128-a512-1024steps-seed0/train_config.json" in out
+        "colm.train.train out/rank-sweep-v2/phi-2-r128-a512-1024steps-seed0/train_config.json" in out
     )
 
 

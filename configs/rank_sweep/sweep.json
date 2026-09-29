@@ -1,7 +1,7 @@
 {
     "name": "rank-sweep",
     "base_config": "configs/rank_sweep/base.json",
-    "output_root": "out/rank-sweep",
+    "output_root": "out/rank-sweep-v2",
     "train_overrides": {},
     "arms": [
         {"lora_r": 128, "lora_alpha": 512},
@@ -19,7 +19,7 @@
         "model_max_length": 2048,
         "batch_size": 8,
         "gpu_memory_utilization": 0.9,
-        "base_output_dir": "out/rank-sweep/phi-2-base/outputs",
+        "base_output_dir": "out/rank-sweep-v2/phi-2-base/outputs",
         "limit": null
     },
     "summary_notes": [

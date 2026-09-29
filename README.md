@@ -141,10 +141,10 @@ trainer log; the step after an evaluation is longer). A saved adapter is evaluat
 one worker drains it serially on one GPU (atomic claim by rename, `done/` / `failed/` with exit
 code, wall clock and log path; a lock file, no polling, no process-name matching).
 ```bash
-colm-sweep create --sweep configs/rank_sweep/sweep.json --queue queues/rank-sweep
-colm-sweep work --queue queues/rank-sweep --gpu 0 --dry-run    # print resolved jobs
-colm-sweep work --queue queues/rank-sweep --gpu 0              # run (the GPU id is required)
-colm-sweep summary --sweep configs/rank_sweep/sweep.json       # out/rank-sweep/summary.md
+colm-sweep create --sweep configs/rank_sweep/sweep.json --queue queues/rank-sweep-v2
+colm-sweep work --queue queues/rank-sweep-v2 --gpu 0 --dry-run    # print resolved jobs
+colm-sweep work --queue queues/rank-sweep-v2 --gpu 0              # run (the GPU id is required)
+colm-sweep summary --sweep configs/rank_sweep/sweep.json       # out/rank-sweep-v2/summary.md
 ```
 Design, arms and timing: `TODO.md` ("LoRA rank sweep").
 

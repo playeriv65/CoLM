@@ -16,8 +16,9 @@ commit / result pointer, delete them once they are recorded in docs. Optimisatio
 - [ ] LoRA rank sweep: r in {8, 16} vs the paper's 128. **Blocked** until the refactor is merged;
       runs with the default (`legacy=False`) path, i.e. with the fixes E4 (tokenisation, no
       truncation), E8 (question-grouped held-out set) and E9 (eval scoring) in `docs/errors.md`.
-      The queue must be regenerated against the fixed code (`colm-sweep create ...`), not the one
-      generated before the refactor. The GPU is assigned by the user.
+      The queue was regenerated against the fixed code (`queues/rank-sweep-v2`, outputs in
+      `out/rank-sweep-v2`); the pre-refactor queue `queues/rank-sweep` and `out/rank-sweep` (old
+      tokenisation, holdout and scoring) must not be reused (deletion pending confirmation). The GPU is assigned by the user.
 - [ ] Precision decisions with evidence in `docs/errors.md` (fp16 attention gradients; fp32
       selection forward must stay), not switched without a decision.
 - [ ] Make evaluation report loss as well as accuracy in `math_eval` (accuracy only today).
@@ -44,10 +45,10 @@ commit / result pointer, delete them once they are recorded in docs. Optimisatio
       accuracy on gsm8k / math / numglue / svamp / deepmind / simuleq for checkpoint-512 and 1024
       (vLLM, PoT + CoT backup, 0-shot); step time, training peak memory, trainable params.
       Launch (queue is generated once, the worker takes the GPU explicitly):
-      `colm-sweep create --sweep configs/rank_sweep/sweep.json --queue queues/rank-sweep`
-      then `colm-sweep work --queue queues/rank-sweep --gpu <id>` in tmux window
+      `colm-sweep create --sweep configs/rank_sweep/sweep.json --queue queues/rank-sweep-v2`
+      then `colm-sweep work --queue queues/rank-sweep-v2 --gpu <id>` in tmux window
       `CoLM-rank-sweep`. Job order: base eval loss, then per arm train -> eval loss -> eval accuracy,
-      then a CPU summary (`out/rank-sweep/summary.{json,md}`). Results/logs: `out/rank-sweep/<run>/`,
+      then a CPU summary (`out/rank-sweep-v2/summary.{json,md}`). Results/logs: `out/rank-sweep-v2/<run>/`,
       `logs/rank-sweep-<job>-r<r>-a<alpha>-<steps>steps-seed<seed>-<timestamp>.log`.
       Estimate (baseline 2868 ms/step): ~49 min training + 4 in-training evaluations x 26 s (measured:
       13.7 s held-out + 11.8 s GSM8K) + ~1 min load, ~20 s standalone loss job, vLLM accuracy job
