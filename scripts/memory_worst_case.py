@@ -5,8 +5,9 @@
 Builds the model of the config (as train.py does), then runs one selection forward (the MeZO
 estimate) and one forward + backward of the training step on packs of maximum-length examples
 (`--length` tokens, half of them label tokens): a pack of `micro_batch_size` examples for the
-selection and of `micro_batch_size * small_batch_ratio` for training. Prints the peak allocated
-and reserved memory of each phase.
+selection; for training `--train_examples` examples go through `batching.train_batches`, i.e.
+packs of at most `train_max_tokens` (an example is never split), a forward + backward per pack.
+Prints the peak allocated and reserved memory of each phase.
 """
 
 import argparse
@@ -37,6 +38,9 @@ def main():
     parser.add_argument(
         "--length", type=int, default=None, help="tokens per example (default: the context window)"
     )
+    parser.add_argument(
+        "--train_examples", type=int, default=2, help="selected examples of the training step"
+    )
     parser.add_argument("--output_dir", default="/tmp/colm-memory")
     cli, rest = parser.parse_known_args()
     model_args, data_args, training_args, _ = parse_args(
@@ -54,7 +58,6 @@ def main():
     rng = np.random.default_rng(0)
     vocab = model.config.vocab_size
     micro = training_args.micro_batch_size
-    train_micro = max(1, int(micro * training_args.small_batch_ratio))
 
     select_pack = trainer._prepare_inputs(pack([example(length, vocab, rng) for _ in range(micro)]))
     trainer.memory.start()
@@ -62,17 +65,26 @@ def main():
     trainer.extractor.extract(select_pack)
     trainer.memory.stop("selection")
 
-    train_pack = trainer._prepare_inputs(
-        pack([example(length, vocab, rng) for _ in range(train_micro)])
-    )
+    selected = [example(length, vocab, rng) for _ in range(cli.train_examples)]
+    packs = trainer.batching.train_batches(selected, [1.0] * len(selected))
+    total = trainer.batching.total_labels(selected)
     trainer.model.train()
     trainer.memory.start()
-    with torch.autocast("cuda", dtype=torch.float16 if training_args.fp16 else torch.bfloat16):
-        loss = trainer.batching.loss(trainer, trainer.model, train_pack, torch.ones(train_micro), 1)
-    loss.backward()
+    for train_pack, weights in packs:
+        train_pack = trainer._prepare_inputs(train_pack)
+        with torch.autocast("cuda", dtype=torch.float16 if training_args.fp16 else torch.bfloat16):
+            loss = trainer.batching.loss(trainer, trainer.model, train_pack, weights, total)
+        loss.backward()
     trainer.memory.stop("train")
     print(
-        json.dumps({"tokens_per_example": length, **trainer.memory.gather(run=True)[0]}, indent=1)
+        json.dumps(
+            {
+                "tokens_per_example": length,
+                "train_packs": len(packs),
+                **trainer.memory.gather(run=True)[0],
+            },
+            indent=1,
+        )
     )
 
 

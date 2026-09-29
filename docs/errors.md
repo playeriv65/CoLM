@@ -48,7 +48,7 @@ contexts on foreign GPUs; the KV cache of the selection forward was copied.
 | id | what | effect |
 |---|---|---|
 | M1 | The last layer computed the LM head over every position: fp32 logits `[4, T, 51200]` = 419 MB, a contiguous copy, the log-softmax (1.26 GB per +-eps call). | The head runs at the label positions only, on packed rows. |
-| M2 | Padding: 36% of the selection tokens and 45% of the training tokens. | No padding: examples are packed into rows of at most `pack_tokens` tokens (`colm/train/attention.py` reads the sequence boundaries; fp32 selection: the memory-efficient kernel, fp16 training: `varlen_attn`). |
+| M2 | Padding: 36% of the selection tokens and 45% of the training tokens. | No padding: examples are packed into rows of at most `pack_tokens` (selection) / `train_max_tokens` (training) tokens (`colm/train/attention.py` reads the sequence boundaries; fp32 selection: the memory-efficient kernel, fp16 training: `varlen_attn`). |
 | D1 | Peak memory was recorded on rank 0 only (`max_memory_allocated`, cumulative, reset by the evaluation on rank 0). Rank 0 also holds the gathered features and Adam temporaries (~0.28 GB x ranks). | `MemoryMeter`: the peaks of every rank, per phase (selection, train), allocated and reserved, gathered at every log and saved as `memory.json`. |
 | - | Features are materialised as `[32, 327680]` fp32 (42 MB per rank) although they are 32 scalars times z. | Kept for now (optimisation work). |
 

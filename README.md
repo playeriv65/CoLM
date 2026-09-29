@@ -90,8 +90,11 @@ recipe). The rest is shared over the ranks by token count and goes through the e
 `data_selection_unit` (default: the batched last-layer MeZO estimate); for it a feature is `g_i z`
 with one fixed direction z, so each rank sends one scalar per example and rank 0 builds the
 features. Facility location picks `small_batch_ratio` of the pool source by source, the picks are
-broadcast and every rank trains on its share, in as few packed forwards as GPU memory allows
-(`train_memory_fraction`, the token budget is measured on the second step). The loss of a step is
+broadcast and every rank trains on its share, in packed forwards chosen by `train_max_tokens`:
+N > 0 (memory mode, default 1536) packs the examples greedily into forwards of at most N tokens and
+accumulates the gradients (phi-2: 1382 ms per step, 32.3 GB peak); `0` (speed mode) puts the whole
+step into one forward (1383 ms, i.e. no faster on phi-2, but 57 GB peak / 94 GB reserved; table in
+`docs/optimization-backlog.md`). The loss of a step is
 the mean over all label tokens of the examples trained in the step (all ranks) whatever the
 grouping. Peak GPU memory is measured on every rank and per phase (`memory.json`, `peak_mem_*` in
 the log).

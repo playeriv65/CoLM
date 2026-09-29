@@ -72,7 +72,7 @@ Per rank: 32 examples forwarded for selection, 16 trained (8 micro-batches of 2)
 | O5 | lm_head + CE only at label positions in the ZO final layer (keep F2 divisor) | math-exact | lm_head is the largest part of each ±eps call. **Done** in the refactor (M1; the divisor is the example's own label count, E2). |
 | O6 | Packed inputs: training (pack each original sub-batch → identical token mean; bigger packs with per-token weights), selection (pack + per-segment loss sum / original divisor) | math-exact | combine with O1/O5; `use_cache=False` (F5). **Done** in the refactor. |
 | O7 | Attention backend: identify the SDPA backend actually used; test `varlen_attn` on sm_120; flex_attention | kernel only | flash needs fp16/bf16 (see decision D2). **Done**: `colm_varlen` (torch `varlen_attn` for the fp16 training, the efficient kernel with cumulative lengths for the fp32 selection); flash-attn 2 measured, no gain (below). |
-| O8 | Train the 16 selected examples in 1–2 large batches with per-token weights reproducing the per-sub-batch means | math-exact (dropout masks differ) | bs 2 micro-batches underuse the GPU. **Done** (one pack per step, or packs under a token budget derived from GPU memory). |
+| O8 | Train the 16 selected examples in 1–2 large batches with per-token weights reproducing the per-sub-batch means | math-exact (dropout masks differ) | bs 2 micro-batches underuse the GPU. **Done** (packs under the token budget `train_max_tokens`, default 1536; 0 = one pack per step). |
 | O9 | Reuse selection-forward activations for the training backward | needs D3 | Blockers: eval vs train dropout, fp32 vs fp16, backward cannot drop unselected rows of a batched graph. Viable variant: per-example graphs, backward only the selected ones; est. −16% compute, 40–50 GB activation memory (estimate). |
 | O10 | 1-D facility location on r_i (F1) | approximate (adam-ε, ties) | needs D4 |
 | O11 | Last decoder layer of the ±eps calls: queries, attention output and MLP only at label positions (K/V for every token) | math-exact | **Not done**: needs a per-architecture layer (the replay is the model's own layer module); est. −20 ms of 1324. |
@@ -158,7 +158,7 @@ What changed and its exactness class (code in `colm/selection/`, `colm/train/tra
 |---|---|---|---|
 | O1 | `CoresetSelector.needed(sources, total)` decides from the source ids, before any forward, which features can change the selection; the others are not computed (zeros, never read). The pool is all-gathered first (cheap), the needed examples are shared over the ranks by token count (`balanced_shares`). Skipped: `keep_sources`, sources with zero quota, sources selected in full when `mezo_optim=sgd`; everything if the kept examples fill the budget. With random tie-breaks (`balanced`), sampled coordinates, a global coordinate ranking (`source_wise_selection=none`) or a pool transform only the kept sources are skipped. | math-exact | float64 CPU: randomised pools/sources/quotas, indices, weights and the Adam moments identical (`tests/test_opt.py`), trainer path identical over 4 steps with kept sources / adam / sgd; 2- and 4-rank gloo runs identical to one process. |
 | O3 / M2 | The MeZO extractor returns g_i (one scalar per example); rank 0 builds the features `g_i z` (`Extractor.expand`, z from the same seeded generator). Only scalars are gathered: no `[N, 327680]` D2H, pickle, gather, H2D. | bitwise on the same g_i | feature matrix = `g[:, None] * z` with `atol=0`; g_i bit-identical whatever the packing in float64. z is regenerated on rank 0: identical to the other ranks' z on GPUs of one architecture. |
-| O8 | The selected examples of a step go through as few packed forwards as GPU memory allows: one pack unless the step exceeds the token budget derived from memory (`train_memory_fraction`, default 0.9; `train_token_budget`: two probes of a forward + backward on the second step give MiB per token and the fixed part, the budget is checked by a probe at its own size and shrinks or halves on out-of-memory). The loss is a token sum over the step divided by the step's label count: independent of the grouping. `SubsetTrainer` packs too. | math-exact (fp rounding order; dropout masks differ, as for any re-batching) | float64: gradients of one pack / packs under a budget = the micro-batch loop to 1e-9 (weighted and unweighted), loss to 1e-12. GPU, fp32 with exact attention: micro-batch packs vs the new packs 1.3e-3 relative gradient difference (max 1.9e-3), loss 1.5e-6 (the fp32 floor). |
+| O8 | The selected examples of a step are packed greedily into forwards of at most `train_max_tokens` tokens (default 1536, memory mode; 0 = unlimited: one pack for the whole step, speed mode). The gradients of the packs accumulate; an example longer than the budget goes alone, none is split. The loss is a token sum over the step divided by the step's label count: independent of the grouping (`test_unlimited_and_bounded_budgets_train_the_same_step`: float64, one pack vs several, gradients 1e-9, loss 1e-12). An out-of-memory error says which value to set. `SubsetTrainer` packs too. | math-exact (fp rounding order; dropout masks differ, as for any re-batching) | float64: gradients of one pack / packs under a budget = the micro-batch loop to 1e-9 (weighted and unweighted), loss to 1e-12. GPU, fp32 with exact attention: micro-batch packs vs the new packs 1.3e-3 relative gradient difference (max 1.9e-3), loss 1.5e-6 (the fp32 floor). |
 | O7 | Training attention kernel unchanged: torch `varlen_attn` (flash) on the packed fp16 rows. flash-attn 2.8.3 (built for sm_120) gives the same numbers (relative 7e-6 to 2e-5 between the two kernels, both 2.4e-4 to 3.8e-4 from fp32 per sequence) and no speed-up (fwd+bwd of one layer, 16 x 220 tokens: 0.42 ms torch, 0.49 ms flash-attn; 6k tokens: 0.99 vs 1.00; 2 x 2048: 0.90 vs 0.91): not adopted, no dependency, no build. End to end, fp16 gradient against the exact fp32 gradient (relative, cosine): `colm_varlen` 0.44 (0.90) one pack of 16 examples, 0.41 (0.94) one example per forward; stock fp16 sdpa 1.17 (0.65) (`docs/errors.md`). | kernel only | see left; the fp16 gradient error is the pending precision decision. |
 | H | Label geometry (positions, targets, segment, counts) computed on the CPU in `pack` (no `nonzero` / `bincount` synchronisation in the losses); `ModeSwitch`: flat flag pass instead of the recursive `train()` walk (4 ms -> 0.3 ms per switch, PreTrainedModel's override is skipped only while `use_kernels` is off); `dataloader_num_workers=1` (tokenising the next pool overlaps the step: 11.5 ms); the unused pool norm of `mezo_transform=none` is no longer computed; `_features` casts to at least fp32 (float64 stays). | bitwise / host only | worker: same pools (test); mode switch: same flags on all modules (test); the census below. |
 | O11 | not done (per-architecture layer replay). | | |
@@ -203,25 +203,39 @@ the optimised run sits at the 5% edge because the fixed part of the step is smal
 Production step time (`profile_timing=off`, no synchronisation; `step_time_s` of the trainer log,
 steps 11-130, same protocol otherwise): main 2317 ms (sliding +-1.5%), optimised 1305 ms (+-4.7%,
 0.9 fraction): **1.78x**; the fine timers cost <= 1.5% on both. Peak GPU memory (allocated, training
-phase; selection 13.1 GB in both): main 32.3 GB, optimised 62.2 GB with the default budget of
-8,599 tokens per forward (reserved 90.8 GB): one pack of the whole step holds ~8 MiB per token
+phase; selection 13.1 GB in both): main 32.3 GB, optimised 62.2 GB with the memory-derived budget of
+8,599 tokens per forward that this commit replaced (reserved 90.8 GB): one pack of the whole step holds ~8 MiB per token
 (measured: 7.92 MiB per token + 17.9 GB fixed, the check at the derived size 84.0 of 84.4 GB).
 
-Training memory against time (`profile_timing=off`, one run each, same pools; the derived budget is
-`(fraction x available - fixed) / slope`, 7.92 MiB per token, 17.9 GB fixed, 93.8 GB available):
+Training pack budget (`train_max_tokens`; replaces the former memory-derived budget, `train_memory_fraction`
+0.9 / 0.5 / 0.3 had given 8,599 / 3,746 / 1,322 tokens, 62.2 / 45.9 / 32.4 GB, 1305 / 1316 / 1380 ms).
+phi-2, default recipe, physical GPU 0 (one job on the card, loadavg 15-25 from other users), 60 steps,
+step time = mean of `step_time_s` over steps 11-60 (`profile_timing=off`), memory from `MemoryMeter`
+(peak of the training phase over the 60 steps), one run each, same pools. Worst case: 2 selected
+examples of 2048 tokens (`scripts/memory_worst_case.py --train_examples 2`, forward + backward of
+every pack, no optimizer step):
 
-| `train_memory_fraction` | tokens per forward | step (ms) | peak training memory (allocated) | reserved | mean loss, 130 steps |
-|---|---:|---:|---:|---:|---:|
-| main `fe4ccfc` (8-9 forwards of ~450 tokens) | - | 2317 | 32.3 GB | 35.4 GB | 0.689 |
-| 0.9 (default) | 8,599 | 1305 | 62.2 GB | 90.8 GB | 0.692 |
-| 0.5 | 3,746 | 1316 | 45.9 GB | 79.1 GB | 0.690 |
-| 0.3 | 1,322 | 1380 (loadavg 28: noisy, 50-step deviation 8%) | 32.4 GB | 36.7 GB | 0.699 |
+| `train_max_tokens` | step (ms) | vs unlimited | peak allocated | reserved | worst case 2 x 2048 (packs, allocated) | mean loss, 60 steps |
+|---|---:|---:|---:|---:|---:|---:|
+| main `fe4ccfc` (8-9 forwards of ~450 tokens) | 2317 | - | 32.3 GB | 35.4 GB | - | (130 steps) 0.689 |
+| 1024 | 1483 | +7.2% | 32.3 GB | 35.8 GB | 2 packs, 32.4 GB | 0.717 |
+| **1536 (default)** | **1382** | **-0.1%** | **32.3 GB** | **42.1 GB** | **2 packs, 32.4 GB** | 0.732 |
+| 2048 | 1362 | -1.5% | 33.9 GB | 41.7 GB | 2 packs, 32.4 GB | 0.725 |
+| 4096 | 1385 | +0.1% | 48.7 GB | 65.5 GB | 1 pack, 47.1 GB | 0.723 |
+| 0 = unlimited (one pack per step) | 1383 | 0 | 57.3 GB | 94.2 GB | 1 pack, 47.1 GB | 0.712 |
 
-The trained tokens of a step are 3.7k on average (5.2k at most in steps 11-130, always one forward at the 0.9 budget), so a budget
-of 3.7k already runs most steps as one forward: 0.5 costs 0.8% against 0.9 and saves 16 GB. The
-first loss is identical to main (0.8853), later ones differ through fp32 tie-breaks and dropout
-masks; the 130-step means agree within 0.01 (noise of that size between runs is expected: one
-seed).
+Choice: the smallest budget within 5% of unlimited is 1536 (1024 is 7% slower: about 20% of the
+steps then need a second pack); its peak equals main's 32.3 GB. The step time is flat from 1536 up
+(the 10-step block means scatter by +-3% inside each run, so 1362-1385 ms are the same speed), memory is
+not: ~8 MiB per packed token beyond ~2k. The worst case of any budget below 4096 is one 2048-token
+example per forward (32.4 GB), because an example is never split; from 4096 up two such examples share
+a forward (47.1 GB, and 57 GB for the longest real step). Unlimited is kept as an explicit option
+(`train_max_tokens=0`): it is not faster on phi-2 at this batch size (the step is bound by the fp32
+selection forward, 58%), so it only pays where the training forward is a larger share of the step.
+Losses differ between the runs (first loss 0.850-0.881 for identical pools) because the selection
+and the dropout masks depend on fp rounding order; one seed each, differences of 0.02 in a 60-step
+mean are that noise, not an effect of the budget. Logs: `logs/pack-budget/` of the worktree
+(machine-local).
 
 Census (steps 2-10, syncing CUDA calls per step): selection 166 -> 120 (88 of them are the
 host-to-device copies of the packs, done before any kernel is queued; the `nonzero` / `bincount`
@@ -238,7 +252,7 @@ the GPU check).
 
 ### Checks on the GPU (phi-2, teacher forced, `scripts/check_opt.py`)
 
-20 steps on GPU 2 (shared with another job, `train_memory_fraction=0.3`, so packs of ~1k tokens),
+20 steps on GPU 2 (shared with another job, packs of ~1k tokens),
 at every step from the same weights, pool and selector state: the plain path (all features, pack
 by pack) vs the optimised `_select`, and the plain path with the pool reversed (other packs:
 the noise floor of fp32 rounding).

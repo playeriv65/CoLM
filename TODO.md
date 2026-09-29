@@ -24,8 +24,7 @@ commit / result pointer, delete them once they are recorded in docs. Optimisatio
       selection forward (est. -150 ms of 1305), O13 fp32 GEMMs in the NN layout (est. -130 ms), O11
       final layer at label positions (est. -20 ms), the base weights stored once (fp32 +
       per-forward fp16 copies today). All are precision-neutral but O12/O13 need extra memory or a
-      custom linear: not started. The training peak memory is now 62 GB (was 32 GB): decide the
-      default of `train_memory_fraction` (0.9 uses ~60-84 GB; 0.5: see the backlog table).
+      custom linear: not started.
 
 ## Experiments
 
@@ -79,7 +78,7 @@ commit / result pointer, delete them once they are recorded in docs. Optimisatio
 ## Done
 
 - 2026-09-28 Execution-only step optimisations on the refactored code (skip unused MeZO forwards,
-  gather g_i scalars, one packed training forward under a memory-derived token budget, host
+  gather g_i scalars, packed training forwards under the `train_max_tokens` budget, host
   overhead): 2317 -> 1305 ms/step on phi-2 (1.78x), same selections up to fp32 rounding
   (`docs/optimization-backlog.md`, `scripts/check_opt.py`, `tests/test_opt.py`).
 - 2026-09-28 Refactor: HF-native trainers (one pool = one HF batch), `colm/selection`, packed

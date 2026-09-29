@@ -32,7 +32,7 @@ are no other launch scripts: do not add shell wrappers, extend the entry points.
   `training_step` (documented extension point): plan (gather the pool, which features are needed)
   -> features of the needed examples (a token-balanced share per rank) -> gather (scalars g_i for
   MeZO) -> rank-0 selection -> broadcast -> forward/backward of the selected examples in packs of
-  `batching.train_tokens` (one pack unless memory says otherwise; `accelerator.no_sync` for all
+  `batching.train_tokens` (= `train_max_tokens`, a plain token budget; `accelerator.no_sync` for all
   but the last). Optimizer step, clipping, scheduler, logging, checkpointing are stock. Do not
   copy HF loop internals back in or touch private HF attributes.
 - `colm/selection/` — `features.py` (one extractor per `data_selection_unit`, on packed batches;
@@ -47,7 +47,7 @@ are no other launch scripts: do not add shell wrappers, extend the entry points.
   process).
 - `colm/train/attention.py` — `colm_varlen` attention for packed rows (registered with
   `AttentionInterface`; the default `attn_implementation`). `colm/train/memory.py` — peak memory
-  of every rank per phase, and the memory-derived training token budget (`train_token_budget`).
+  of every rank per phase (`MemoryMeter`).
   `colm/train/step_timing.py` — opt-in per-phase step timer and its summariser
   (`--profile_timing coarse|fine`; keep new timing sections behind `timer.section`).
 - `colm/train/config.py` (JSON + flags, model recipe from `configs/model_profiles.json`, resolved

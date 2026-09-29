@@ -19,9 +19,9 @@ import torch
 from transformers import PreTrainedModel, Trainer
 
 from colm.data.superglue import classification_loss
-from colm.selection.batching import PackedBatching
+from colm.selection.batching import UNLIMITED, PackedBatching
 from colm.selection.features import build_extractor
-from colm.selection.packing import META, Example, balanced_shares, pack
+from colm.selection.packing import META, balanced_shares
 from colm.selection.pool import (
     all_gather_object,
     broadcast_object,
@@ -32,7 +32,7 @@ from colm.selection.pool import (
 from colm.selection.select import CoresetSelector
 from colm.selection.zo import zo_parameters
 from colm.train import attention
-from colm.train.memory import MemoryMeter, train_token_budget
+from colm.train.memory import MemoryMeter
 from colm.train.step_timing import StepTimer, StepTimingCallback
 
 logger = logging.getLogger(__name__)
@@ -249,45 +249,12 @@ class CoresetTrainer(_Trainer):
             "selected_per_rank": self._per_rank(args.pool_micro_batches),
             "pack_tokens": {
                 "selection": self.batching.select_tokens,
-                "training": "memory-derived (second step)"
-                if self.batching.derive_train_tokens
+                "training": "unlimited"
+                if self.batching.train_tokens == UNLIMITED
                 else self.batching.train_tokens,
             },
             "attn_implementation": self.model.config._attn_implementation,
         }
-
-    def _derive_train_tokens(self, model) -> None:
-        """Size the training packs by memory: the tokens of one forward + backward that fit."""
-        length = int(self.batching.mean_tokens)
-        vocab = self.model.config.vocab_size
-        rng = np.random.default_rng(0)
-
-        def probe(tokens: int) -> None:
-            examples = []
-            for _ in range(max(1, tokens // length)):
-                ids = rng.integers(vocab, size=length)
-                examples.append(Example(input_ids=ids, labels=ids.copy()))
-            batch = self._prepare_inputs(pack(examples))
-            try:
-                with self.accelerator.no_sync(model):
-                    with self.compute_loss_context_manager():
-                        loss = self.batching.loss(
-                            self,
-                            model,
-                            batch,
-                            torch.ones(len(examples)),
-                            self.batching.total_labels(examples),
-                        )
-                    self.accelerator.backward(loss)
-            finally:  # also after an out-of-memory error
-                loss = None
-                model.zero_grad(set_to_none=True)
-
-        budget = train_token_budget(
-            probe, (2 * length, 6 * length), self.args.train_memory_fraction
-        )
-        logger.info(f"Training packs: {budget} tokens per forward (derived from GPU memory)")
-        self.batching.train_tokens = budget
 
     # ----- budgets and sub-batches (differ between the two coreset trainers) --------------
     def _check_args(self):
@@ -300,8 +267,6 @@ class CoresetTrainer(_Trainer):
     def training_step(self, model, inputs, num_items_in_batch=None):
         if self._last_log is None:
             self._last_log = (time.perf_counter(), self.state.global_step)
-        if self.batching.derive_train_tokens and self._steps_taken == 1:
-            self._derive_train_tokens(model)  # once, with the optimizer state in place
         self._steps_taken += 1
         start = time.perf_counter()
         self.memory.start()
@@ -316,7 +281,14 @@ class CoresetTrainer(_Trainer):
                 self.set_mode(model, True)
                 if hasattr(self.optimizer, "train") and callable(self.optimizer.train):
                     self.optimizer.train()  # schedule-free optimizers
-            done = torch.zeros((), device=self.args.device)
+            done = self._train_packs(model, sub_batches, total)
+        self.memory.stop("train")
+        return done
+
+    def _train_packs(self, model, sub_batches: list, total: int) -> torch.Tensor:
+        """Forward + backward of every pack of the step; the step loss (summed over the packs)."""
+        done = torch.zeros((), device=self.args.device)
+        try:
             for i, (batch, weight) in enumerate(sub_batches):
                 with self._timer.fine("prepare"):
                     batch = self._prepare_inputs(batch)
@@ -328,7 +300,8 @@ class CoresetTrainer(_Trainer):
                     with self._timer.section("backward"):
                         self.accelerator.backward(loss)
                 done += loss.detach()
-        self.memory.stop("train")
+        except torch.OutOfMemoryError as error:
+            raise torch.OutOfMemoryError(f"{error}\n{self.batching.memory_hint()}") from error
         return done
 
     def _select(self, inputs: dict):

@@ -15,30 +15,24 @@ from colm.selection.packing import (
     pack,
 )
 
+UNLIMITED = 2**62  # token budget of `train_max_tokens=0`
+
 
 class PackedBatching:
-    """Padding-free: examples are packed into rows of at most `pack_tokens` tokens.
+    """Padding-free: examples are packed into rows of at most `select_tokens` / `train_tokens`.
 
     The loss of a step is the mean over all label tokens of the examples trained in the step
     (all sub-batches and all ranks), the gradient-accumulation semantics of transformers, times
     the weight of each example. It does not depend on how the examples are grouped, so the
-    selected examples go through as few forwards as memory allows (`train_tokens`).
+    selected examples go through as few forwards as the token budget `train_max_tokens` allows.
     """
 
     def __init__(self, args, mean_tokens: float, batched: bool):
         self.args, self.batched = args, batched
-        self.mean_tokens = mean_tokens
-        micro = args.micro_batch_size
-        train_micro = max(1, int(micro * args.small_batch_ratio))
         # Tokens of a micro-batch of the padded recipe, without its padding.
-        self.select_tokens = args.pack_tokens or int(micro * mean_tokens)
-        # Training: the tokens that fit in memory (`set_train_tokens`, measured on the first
-        # steps); until then, and if they cannot be measured, one micro-batch of the recipe
-        # (CPU: no limit).
-        self.train_tokens = args.pack_tokens or (
-            int(train_micro * mean_tokens) if torch.cuda.is_available() else 2**62
-        )
-        self.derive_train_tokens = not args.pack_tokens and torch.cuda.is_available()
+        self.select_tokens = args.pack_tokens or int(args.micro_batch_size * mean_tokens)
+        # Training: 0 (unlimited) is one pack for the whole step.
+        self.train_tokens = args.train_max_tokens or UNLIMITED
 
     def feature_batches(self, examples: list[Example]) -> list[dict]:
         """The packs whose features are extracted (`examples` in pool order)."""
@@ -57,6 +51,14 @@ class PackedBatching:
             (pack([examples[i] for i in group]), torch.tensor([weights[i] for i in group]))
             for group in groups
         ]
+
+    def memory_hint(self) -> str:
+        if self.train_tokens == UNLIMITED:
+            return (
+                "train_max_tokens=0 puts all examples of a step into one forward + backward: "
+                "set train_max_tokens to a positive value (e.g. 2048) to bound the activations."
+            )
+        return f"train_max_tokens={self.train_tokens}: lower it to reduce the activation memory."
 
     def total_labels(self, examples: list[Example]) -> int:
         return sum(e.num_labels for e in examples)

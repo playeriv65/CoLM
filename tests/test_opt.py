@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from equivalence.helpers import build, make_args
 from torch.func import functional_call
 
+from colm.selection.batching import UNLIMITED
 from colm.selection.features import example_means
 from colm.selection.packing import (
     IGNORE_INDEX,
@@ -23,7 +24,6 @@ from colm.selection.packing import (
     pack,
 )
 from colm.selection.select import CoresetSelector
-from colm.train import memory as memory_module
 
 # ---------------------------------------------------------------------------------------------
 # Label geometry computed on the CPU at pack time (no device synchronisation later)
@@ -349,12 +349,59 @@ def test_one_forward_has_the_gradient_of_the_micro_batch_loop(
     assert grads_loop.norm() > 0
 
 
+def _step_gradients(trainer, model, examples, weights):
+    """Loss and gradients of the real training loop (`_train_packs`) on the given selection."""
+    model.zero_grad(set_to_none=True)
+    model.train()
+    sub_batches = trainer.batching.train_batches(examples, weights)
+    loss = trainer._train_packs(model, sub_batches, trainer.batching.total_labels(examples))
+    grads = torch.cat([p.grad.flatten() for p in model.parameters() if p.grad is not None])
+    return len(sub_batches), float(loss), grads
+
+
+def test_unlimited_and_bounded_budgets_train_the_same_step(tmp_path, tokenizer, mixture_file):
+    """`train_max_tokens=0` (one pack) and a small budget (several packs): same loss and gradient."""
+    trainer, model = _efficient_trainer(
+        tmp_path, tokenizer, mixture_file, keep_sources="", train_max_tokens=0
+    )
+    assert trainer.batching.train_tokens == UNLIMITED
+    examples = next(iter(trainer.get_train_dataloader()))["examples"]
+    weights = np.linspace(0.5, 2.0, len(examples)).tolist()
+    packs_all, loss_all, grads_all = _step_gradients(trainer, model, examples, weights)
+    trainer.batching.train_tokens = sum(len(e) for e in examples) // 4
+    packs_few, loss_few, grads_few = _step_gradients(trainer, model, examples, weights)
+    assert packs_all == 1 and packs_few > 2
+    assert loss_few == pytest.approx(loss_all, rel=1e-12)
+    torch.testing.assert_close(grads_few, grads_all, rtol=1e-9, atol=1e-13)
+    assert grads_all.norm() > 0
+
+
+def test_the_budget_is_a_bounded_default_and_out_of_memory_says_what_to_set(
+    tmp_path, tokenizer, mixture_file, monkeypatch
+):
+    trainer, model = _efficient_trainer(tmp_path, tokenizer, mixture_file, keep_sources="")
+    assert trainer.args.train_max_tokens > 0
+    assert trainer.batching.train_tokens == trainer.args.train_max_tokens
+    examples = next(iter(trainer.get_train_dataloader()))["examples"]
+
+    def out_of_memory(*args, **kwargs):
+        raise torch.OutOfMemoryError("CUDA out of memory")
+
+    monkeypatch.setattr(trainer.batching, "loss", out_of_memory)
+    sub_batches = trainer.batching.train_batches(examples, [1.0] * len(examples))
+    with pytest.raises(torch.OutOfMemoryError, match="lower it"):
+        trainer._train_packs(model, sub_batches, 1)
+    trainer.batching.train_tokens = UNLIMITED
+    with pytest.raises(torch.OutOfMemoryError, match="set train_max_tokens to a positive value"):
+        trainer._train_packs(model, sub_batches, 1)
+
+
 def test_train_batches_pack_the_selection_under_the_token_budget(tmp_path, tokenizer, mixture_file):
     trainer, _ = _efficient_trainer(tmp_path, tokenizer, mixture_file, keep_sources="")
     examples = next(iter(trainer.get_train_dataloader()))["examples"]
     weights = [1.0] * len(examples)
-    assert not torch.cuda.is_available() or trainer.batching.derive_train_tokens
-    trainer.batching.train_tokens = 2**62  # no memory limit: one forward
+    assert trainer.batching.train_tokens == trainer.args.train_max_tokens
+    trainer.batching.train_tokens = 2**62  # no limit: one forward
     assert len(trainer.batching.train_batches(examples, weights)) == 1
     trainer.batching.train_tokens = sum(len(e) for e in examples) // 2
     batches = trainer.batching.train_batches(examples, weights)
@@ -366,61 +413,6 @@ def test_train_batches_pack_the_selection_under_the_token_budget(tmp_path, token
     assert sorted(i for b, _ in batches for i in b["colm_meta"]["indices"].tolist()) == sorted(
         e.index for e in examples
     )
-
-
-# ---------------------------------------------------------------------------------------------
-# The memory-derived pack size
-# ---------------------------------------------------------------------------------------------
-
-
-def _fake_gpu(monkeypatch, peak_of, available=80 * 2**30):
-    state = {"peak": 0}
-
-    def probe(n):
-        state["peak"] = peak_of(n)
-
-    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (available - 20 * 2**30, 96 * 2**30))
-    monkeypatch.setattr(torch.cuda, "memory_reserved", lambda: 20 * 2**30)
-    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
-    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
-    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda: state["peak"])
-    return probe
-
-
-def test_train_token_budget_from_two_probes(monkeypatch):
-    """peak(n) = fixed + slope * n  =>  budget = (fraction * available - fixed) / slope."""
-    fixed, slope = 10 * 2**30, 5 * 2**20
-    probe = _fake_gpu(monkeypatch, lambda n: fixed + slope * n)
-    budget = memory_module.train_token_budget(probe, (900, 2700), 0.9)
-    assert budget == int((0.9 * 80 * 2**30 - fixed) / slope)
-    with pytest.raises(RuntimeError):
-        memory_module.train_token_budget(lambda n: None, (900, 2700), 0.9)
-
-
-def test_train_token_budget_is_checked_at_the_derived_size(monkeypatch):
-    """Memory that grows faster than linearly: the check shrinks the budget until it fits."""
-    fixed, slope = 10 * 2**30, 5 * 2**20
-    limit = 0.9 * 80 * 2**30
-
-    def peak(n):
-        return fixed + slope * n + 3 * n * n * 1000  # a quadratic term the probes barely see
-
-    probe = _fake_gpu(monkeypatch, peak)
-    budget = memory_module.train_token_budget(probe, (900, 2700), 0.9)
-    assert 2700 < budget < int((limit - fixed) / slope)
-    assert peak(budget) <= limit * 1.02  # within a refinement of the limit
-    # An out-of-memory error at the derived size halves it.
-    calls = []
-
-    def oom(n):
-        calls.append(n)
-        if n > 5000:
-            raise torch.OutOfMemoryError("out of memory")
-        return fixed + slope * n
-
-    probe = _fake_gpu(monkeypatch, oom)
-    budget = memory_module.train_token_budget(probe, (900, 2700), 0.9)
-    assert budget <= 5000 and max(calls) > 5000
 
 
 def test_example_means_use_the_counts_of_the_pack(tokenizer):

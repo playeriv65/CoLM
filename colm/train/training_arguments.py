@@ -85,20 +85,22 @@ class TrainingArguments(HFTrainingArguments):
     pack_tokens: int = field(
         default=0,
         metadata={
-            "help": "Tokens per packed forward pass (a forward always holds at least one example). "
-            "0: selection forwards hold the tokens of one micro-batch of the padded recipe "
-            "(micro batch size x mean example length of the data); training forwards hold as many "
-            "tokens as fit in GPU memory (measured after the first step, see "
-            "train_memory_fraction), i.e. the selected examples of a step usually go through one "
-            "forward."
+            "help": "Tokens per packed selection forward (a forward always holds at least one "
+            "example). 0: the tokens of one micro-batch of the padded recipe (micro batch size x "
+            "mean example length of the data)."
         },
     )
-    train_memory_fraction: float = field(
-        default=0.9,
+    train_max_tokens: int = field(
+        default=1536,
         metadata={
-            "help": "Share of the GPU memory available to the process that the training packs "
-            "may fill (headroom for allocator fragmentation and the gathered selection state). "
-            "Used when pack_tokens is 0."
+            "help": "Packed tokens per training forward + backward. N > 0 (memory mode, default "
+            "1536): the selected examples of a step are packed greedily into forwards of at most "
+            "N tokens (an example longer than N goes alone; none is split or truncated) and the "
+            "gradients are accumulated; phi-2: 1536 gives 32.3 GB peak and 1382 ms per step. "
+            "0 (speed mode, unlimited): all selected examples of the step in ONE forward + "
+            "backward; phi-2: 1383 ms per step (no faster) but 57 GB peak (94 GB reserved), "
+            "so use it only with memory to spare. The step loss and gradient are the same "
+            "in both modes."
         },
     )
     data_selection_method: Literal["submodlib", "weightedsubmodlib", "none"] = field(
