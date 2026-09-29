@@ -63,7 +63,9 @@ def run(case: str, data: str, out: str, gas_scale: int = 1, steps: int = 2) -> d
 
     trainer.training_step = training_step
     trainer.train()
+    replicas = trainer.check_replicas()
     return {
+        "replicas": replicas,
         "trained": trained,
         "lora": {k: v.tolist() for k, v in lora_state(model).items()},
         "steps": trainer.state.global_step,

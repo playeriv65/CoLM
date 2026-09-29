@@ -242,6 +242,7 @@ def main(argv=None):
         save_resolved_config(config, training_args.output_dir)
 
     result = trainer.train(resume_from_checkpoint=model_args.checkpoint_path)
+    trainer.check_replicas()
     trainer.save_model()
     metrics = result.metrics
     metrics["train_samples"] = len(train_dataset)

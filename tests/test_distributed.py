@@ -80,3 +80,10 @@ def test_ranks_agree_with_one_process(tmp_path, mixture_file, case, world):
     assert ranks[0]["loss"] == pytest.approx(single["loss"], rel=1e-6)
     # One gradient all-reduce per optimizer step, not one per sub-batch.
     assert [r["all_reduces"] for r in ranks] == [STEPS] * world
+
+
+def test_check_replicas_compares_the_ranks(tmp_path, mixture_file):
+    ranks = _launch(tmp_path, mixture_file, "efficient", 2)
+    assert (
+        all(r["replicas"] == ranks[0]["replicas"] for r in ranks) and len(ranks[0]["replicas"]) == 2
+    )

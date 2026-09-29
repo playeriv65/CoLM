@@ -105,6 +105,19 @@ class _Trainer(Trainer):
         self.memory.stop("train")
         return loss
 
+    def check_replicas(self) -> list[float]:
+        """Checksum of the trainable parameters on every rank (a collective); raises if they differ."""
+        total = sum(
+            float(p.detach().double().abs().sum())
+            for p in self.model.parameters()
+            if p.requires_grad
+        )
+        sums = all_gather_object(total)
+        if len(set(sums)) != 1:
+            raise RuntimeError(f"the ranks trained different weights: {sums}")
+        logger.info(f"Trainable weights identical on all {len(sums)} ranks (checksum {total!r})")
+        return sums
+
     def save_memory_report(self) -> dict[str, float]:
         """Peaks of every rank over the whole run -> `memory.json` (a collective: call on all ranks)."""
         ranks = self.memory.gather(run=True)
