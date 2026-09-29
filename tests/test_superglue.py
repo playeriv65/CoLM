@@ -120,3 +120,12 @@ def test_generation_task_with_selection(tmp_path, tokenizer, unit):
     )
     trainer.train()
     assert trainer.state.global_step == 2
+
+
+def test_task_datasets_are_namespaced_hub_ids():
+    """`datasets` >= 4 cannot resolve the bare `super_glue` / `squad` / `drop` names (they were
+    loading scripts): `colm-eval superglue` failed for every task but SST2 and BoolQ."""
+    from colm.data import tasks
+
+    for name in ("SUPERGLUE", "GLUE", "BOOLQ", "SQUAD", "DROP"):
+        assert "/" in getattr(tasks, name), name

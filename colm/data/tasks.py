@@ -27,6 +27,13 @@ from colm.data.utils import temp_seed
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+# datasets >= 4 only resolves namespaced hub ids (the bare names were loading scripts).
+SUPERGLUE = "aps/super_glue"
+GLUE = "nyu-mll/glue"
+BOOLQ = "google/boolq"
+SQUAD = "rajpurkar/squad"
+DROP = "ucinlp/drop"
+
 
 def get_task(task_name):
     aa = task_name.split("__")
@@ -142,7 +149,7 @@ class SST2Dataset(Dataset):
         self.load_dataset(subtask, **kwargs)
 
     def load_dataset(self, path, **kwargs):
-        d = load_dataset("glue", "sst2")
+        d = load_dataset(GLUE, "sst2")
         train_d = d["train"]
         validation_d = d["validation"]
 
@@ -169,8 +176,8 @@ class CopaDataset(Dataset):
         self.load_dataset(subtask, **kwargs)
 
     def load_dataset(self, path, **kwargs):
-        train_examples = load_dataset("super_glue", "copa")["train"]
-        valid_examples = load_dataset("super_glue", "copa")["validation"]
+        train_examples = load_dataset(SUPERGLUE, "copa")["train"]
+        valid_examples = load_dataset(SUPERGLUE, "copa")["validation"]
 
         train_samples = [self.build_sample(example) for example in train_examples]
         valid_samples = [self.build_sample(example) for example in valid_examples]
@@ -196,7 +203,7 @@ class BoolQDataset(Dataset):
         self.load_dataset(subtask, **kwargs)
 
     def load_dataset(self, path, **kwargs):
-        d = load_dataset("boolq")
+        d = load_dataset(BOOLQ)
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -222,7 +229,7 @@ class MultiRCDataset(Dataset):
         self.load_dataset(subtask, **kwargs)
 
     def load_dataset(self, path, **kwargs):
-        d = load_dataset("super_glue", "multirc")
+        d = load_dataset(SUPERGLUE, "multirc")
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -244,7 +251,7 @@ class CBDataset(Dataset):
         self.load_dataset(subtask, **kwargs)
 
     def load_dataset(self, path, **kwargs):
-        d = load_dataset("super_glue", "cb")
+        d = load_dataset(SUPERGLUE, "cb")
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -266,7 +273,7 @@ class WICDataset(Dataset):
         self.load_dataset(subtask, **kwargs)
 
     def load_dataset(self, path, **kwargs):
-        d = load_dataset("super_glue", "wic")
+        d = load_dataset(SUPERGLUE, "wic")
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -288,7 +295,7 @@ class WSCDataset(Dataset):
         self.load_dataset(subtask, **kwargs)
 
     def load_dataset(self, path, **kwargs):
-        d = load_dataset("super_glue", "wsc.fixed")
+        d = load_dataset(SUPERGLUE, "wsc.fixed")
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -312,7 +319,7 @@ class ReCoRDDataset(Dataset):
         self.load_dataset(subtask, **kwargs)
 
     def load_dataset(self, path, **kwargs):
-        d = load_dataset("super_glue", "record")
+        d = load_dataset(SUPERGLUE, "record")
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -336,7 +343,7 @@ class RTEDataset(Dataset):
         self.load_dataset(subtask, **kwargs)
 
     def load_dataset(self, path, **kwargs):
-        d = load_dataset("super_glue", "rte")
+        d = load_dataset(SUPERGLUE, "rte")
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -362,7 +369,7 @@ class SQuADDataset(Dataset):
         self.load_dataset()
 
     def load_dataset(self):
-        dataset = load_dataset("squad")
+        dataset = load_dataset(SQUAD)
         train_examples = dataset["train"]
         valid_examples = dataset["validation"]
 
@@ -403,7 +410,7 @@ class DROPDataset(Dataset):
         self.load_dataset()
 
     def load_dataset(self):
-        dataset = load_dataset("drop")
+        dataset = load_dataset(DROP)
         train_examples = dataset["train"]
         valid_examples = dataset["validation"]
 
