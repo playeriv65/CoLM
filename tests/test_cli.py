@@ -37,6 +37,7 @@ def test_a_plain_run_is_the_paper_recipe(tmp_path):
     assert training.report_to == [] and training.save_only_model
     # the recipe of phi: fp16 AMP over fp32 weights, LoRA on q k v fc1 fc2
     assert training.fp16 and model.torch_dtype == "none"
+    assert training.selection_prefix_dtype == "float16"
     assert model.lora_target_modules == ["q_proj", "k_proj", "v_proj", "fc1", "fc2"]
     assert (model.lora_r, model.lora_alpha) == (128, 512)
     # flash varlen for the fp16 training forward, sdpa (fp32-capable) for the selection forward
@@ -50,6 +51,27 @@ def test_fp32_runs_keep_the_default_attention(tmp_path):
     assert not training.fp16 and model.attn_implementation is None
     model, *_ = _parse(tmp_path, "--precision", "fp32", "--attn_implementation", "eager")
     assert model.attn_implementation == "eager"
+
+
+def test_selection_prefix_precision_uses_profile_then_explicit_override(tmp_path):
+    assert _parse(tmp_path)[2].selection_prefix_dtype == "float16"
+    assert (
+        _parse(tmp_path, config={"selection_prefix_dtype": "float32"})[2].selection_prefix_dtype
+        == "float32"
+    )
+    assert (
+        _parse(tmp_path, "--selection_prefix_dtype", "float32")[2].selection_prefix_dtype
+        == "float32"
+    )
+    assert (
+        _parse(
+            tmp_path,
+            "--selection_prefix_dtype",
+            "float16",
+            config={"selection_prefix_dtype": "float32"},
+        )[2].selection_prefix_dtype
+        == "float16"
+    )
 
 
 def test_config_files_hold_only_the_differences(tmp_path):
@@ -152,7 +174,7 @@ def test_train_writes_the_resolved_config(tmp_path, tokenizer, mixture_file):
     config = {
         "model_name_or_path": str(model_dir), "train_files": [mixture_file], "output_dir": str(tmp_path / "out"),
         "max_steps": 1, "gradient_accumulation_steps": 2, "keep_sources": "0", "last_layer_index": 1,
-        "zo_dim": 16, "lora_r": 4, "lora_alpha": 16, "use_cpu": True, "precision": "fp32", "save_strategy": "no",
+        "zo_dim": 16, "lora_r": 4, "lora_alpha": 16, "use_cpu": True, "precision": "fp32", "selection_prefix_dtype": "float32", "save_strategy": "no",
         "lora_target_modules": ["q_proj", "k_proj", "v_proj", "fc1", "fc2"],
     }  # fmt: skip
     path = tmp_path / "config.json"

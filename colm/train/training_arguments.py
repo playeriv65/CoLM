@@ -93,11 +93,19 @@ class TrainingArguments(HFTrainingArguments):
     selection_attn_implementation: str = field(
         default="sdpa",
         metadata={
-            "help": "Attention of the selection forward (fp32, no gradient), which needs a kernel "
-            "that runs in fp32; the training forward uses --attn_implementation. Packed rows "
+            "help": "Attention of the selection forward (no gradient); "
+            "the training forward uses --attn_implementation. Packed rows "
             "carry `position_ids` and the cumulative lengths of the flash kernels; stock "
             "transformers builds the block mask (sdpa, flex_attention) or the varlen call "
             "(flash_attention_2) from them."
+        },
+    )
+    selection_prefix_dtype: Literal["float32", "float16"] = field(
+        default="float32",
+        metadata={
+            "help": "Precision of the unperturbed MeZO decoder prefix. The model profile "
+            "sets the CLI default (Phi-2: float16); an explicit flag or JSON value overrides it. "
+            "float16 requires fp32 model weights; the perturbed last layer, head, and loss stay fp32."
         },
     )
     train_max_tokens: int = field(

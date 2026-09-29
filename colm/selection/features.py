@@ -8,6 +8,7 @@ feature never depends on the other examples of its pack.
 """
 
 import math
+from contextlib import nullcontext
 
 import torch
 import torch.nn.functional as F
@@ -139,13 +140,27 @@ class MezoEfficient(Extractor):
         self.split = LastLayerSplit(base)
         self.perturbation = Perturbation(zo_params, args.mezo_eps, seed)
         self.names = {n: self.split.relative_name(n) for n in self.perturbation.names}
+        self.prefix_dtype = args.selection_prefix_dtype
+        if self.prefix_dtype == "float16" and any(
+            p.is_floating_point() and p.dtype != torch.float32
+            for module in (self.split.decoder, self.split.head)
+            for p in module.parameters()
+        ):
+            raise ValueError("float16 selection prefix requires fp32 model weights")
 
     def extract(self, pack):
         split, t = self.split, self.timer
         positions, targets, segment = label_positions(pack)
         counts = label_counts(pack)
         with t.fine("prefix"), torch.inference_mode():
-            state = split.prefix(**model_inputs(pack))
+            prefix_amp = self.prefix_dtype == "float16"
+            if prefix_amp and not torch.cuda.is_available():
+                raise RuntimeError("float16 selection prefix requires CUDA")
+            context = torch.autocast("cuda", dtype=torch.float16) if prefix_amp else nullcontext()
+            with context:
+                state = split.prefix(**model_inputs(pack))
+            if prefix_amp:
+                state = state.float()
 
         def loss(overrides):
             overrides = {self.names[n]: v for n, v in overrides.items()}

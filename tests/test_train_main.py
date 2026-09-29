@@ -33,6 +33,7 @@ def test_train_main_runs(tmp_path, tokenizer, mixture_file, efficient):
         "lora_target_modules": ["q_proj", "k_proj", "v_proj", "fc1", "fc2"],
         "use_cpu": True,
         "precision": "fp32",
+        "selection_prefix_dtype": "float32",
         "save_strategy": "no",
     }
     config_path = tmp_path / "config.json"

@@ -1,0 +1,10 @@
+{
+  "_doc": "Phi-2 adapter recipe for scripts/check_prefix_precision.py; the saved adapter and pool are separate inputs.",
+  "model_name_or_path": "microsoft/phi-2",
+  "lora": {
+    "r": 128,
+    "alpha": 512,
+    "dropout": 0.05,
+    "target_modules": ["q_proj", "k_proj", "v_proj", "fc1", "fc2"]
+  }
+}

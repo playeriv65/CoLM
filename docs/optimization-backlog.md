@@ -9,6 +9,10 @@
 > (26.9%, not 36.9%).
 
 Goal: make a CoLM training step faster **without changing the mini-batch selection semantics**.
+
+The profiles and timing tables through the stock-attention section below describe
+the FP32-prefix baseline. The later FP16-prefix default and its measured
+selection change are documented in `docs/fp16-prefix.md`.
 Every item states whether it is bitwise-exact, mathematically exact (float rounding only), or a
 semantic change that needs an explicit decision. Measure before and after each item with the
 `profile_timing` breakdown (one run, ≥120 steps, drop 10 warmup, closure against step wall clock).
@@ -82,8 +86,11 @@ Per rank: 32 examples forwarded for selection, 16 trained (8 micro-batches of 2)
 ## Open decisions (user)
 
 - D1: keep F2 divisor (current) or normalise by valid tokens (changes selection).
-- D2: selection forward precision: keep fp32 (upstream) or fp16 autocast like training (enables
-  flash varlen and O9).
+- D2: FP16 prefix / FP32 last-layer and loss was adopted in the Phi-2 profile
+  (`selection_prefix_dtype=float16`; `float32` restores the old
+  prefix). It measured 1011 vs 1425 ms/step, but selected-set overlap is 13.0/16
+  against an FP32 packing floor of 15.17/16. Learning quality remains untested;
+  see `docs/fp16-prefix.md`.
 - D3: accept `enable_dropout=False` (no LoRA / residual dropout) to make O9 exact.
 - D4: whether O10 is acceptable.
 

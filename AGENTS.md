@@ -48,8 +48,9 @@ are no other launch scripts: do not add shell wrappers, extend the entry points.
 - Attention is stock transformers (no custom kernel): packed rows carry `position_ids` and the
   flash cumulative lengths (`packing.model_inputs`); the training forward runs
   `attn_implementation` (`flash_attention_2`, recipe default in `configs/model_profiles.json`; the
-  hub kernel through `kernels` when `flash-attn` is not installed) and the fp32 no-grad selection
-  forward `selection_attn_implementation` (`sdpa`, dense block mask); the trainer switches with
+  hub kernel through `kernels` when `flash-attn` is not installed) and the no-grad selection
+  forward `selection_attn_implementation` (`sdpa`, dense block mask; fp16 prefix and fp32
+  suffix for the Phi-2 recipe); the trainer switches with
   `model.set_attn_implementation` (`_Trainer.set_attention`). `colm/train/memory.py` — peak memory
   of every rank per phase (`MemoryMeter`).
   `colm/train/step_timing.py` — opt-in per-phase step timer and its summariser
@@ -80,8 +81,14 @@ are no other launch scripts: do not add shell wrappers, extend the entry points.
 - Exactness is float64 identity on CPU: in fp32 the MeZO feature is decided at rounding level
   (a fp32 run of the upstream code agrees with itself in 3 of 20 steps), so end-to-end fp32 runs
   are compared statistically (selection overlap against that noise floor), not bitwise.
-- The packed selection forward must stay fp32 (eps 1e-3: fp16 features are noise) and packed
-  inputs need `use_cache=False` (a cache ends the packed-batch detection of transformers).
+- The Phi-2 model profile sets `selection_prefix_dtype=float16`: the unperturbed
+  prefix uses fp16 autocast and requires fp32 model weights, while the perturbed
+  last layer and loss remain fp32. Other profiles retain their explicit precision
+  until tested. CLI/JSON overrides take precedence; the resolved configuration
+  records the choice. The Phi-2 path changes selected sets beyond
+  the fp32 packing noise (`docs/fp16-prefix.md`); learning quality has not yet
+  been compared. Packed inputs need `use_cache=False` (a cache ends the
+  packed-batch detection of transformers).
 
 ## Optimisation work
 

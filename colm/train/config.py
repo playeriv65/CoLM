@@ -88,6 +88,8 @@ def parse_args(argv: list[str] | None = None):
     extra = {}
     if not model_args.lora_target_modules:
         extra["lora_target_modules"] = profile["lora_target_modules"]
+    if "selection_prefix_dtype" not in defaults:
+        extra["selection_prefix_dtype"] = profile["selection_prefix_dtype"]
     if not model_args.attn_implementation and model_args.precision != "fp32":
         extra["attn_implementation"] = profile["attn_implementation"]
     explicit = defaults.get("fp16") or defaults.get("bf16") or "--fp16" in argv or "--bf16" in argv

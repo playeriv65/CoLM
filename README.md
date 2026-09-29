@@ -32,8 +32,20 @@ uv sync --all-extras     # everything
 `bitsandbytes` are no longer needed, and `flash-attn` is not compiled: attention is stock
 transformers (`flash_attention_2` for the fp16 training forward, loaded as the hub kernel
 `kernels-community/flash-attn2` through the `kernels` package unless `flash-attn` is installed;
-`sdpa` for the fp32 selection forward). On CPU, on GPUs older than Ampere or without mixed
+`sdpa` for the selection forward). On CPU, on GPUs older than Ampere or without mixed
 precision pass `--attn_implementation sdpa`.
+
+With the Phi-2 recipe, selection now runs the unperturbed decoder prefix under
+FP16 autocast and keeps the perturbed last layer and loss in FP32. The
+Phi-2's model profile sets `selection_prefix_dtype=float16` and requires FP32
+model weights; pass `--selection_prefix_dtype float32` to retain the old prefix.
+This is faster but changes
+selected examples beyond the measured FP32 packing noise. Learning quality has
+not yet been compared; see [`docs/fp16-prefix.md`](docs/fp16-prefix.md).
+Other model profiles retain their existing prefix precision until tested; an
+explicit command-line or JSON value overrides the profile. The resolved run
+configuration records the selected mode, and an unsupported FP16-prefix/weight
+combination fails at startup.
 
 W&B is off by default (`report_to="none"`, nothing imports `wandb`). To log a run, install the extra
 and pass `--report_to wandb` (optionally `--wandb_project/--wandb_entity/--wandb_notes`, or the

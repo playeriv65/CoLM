@@ -89,6 +89,20 @@ class Prefix:
     args: tuple
     kwargs: dict[str, Any]
 
+    def float(self) -> "Prefix":
+        """Promote floating prefix outputs before the perturbed fp32 suffix replay."""
+
+        def promote(value):
+            if isinstance(value, torch.Tensor) and value.is_floating_point():
+                return value.float()
+            if isinstance(value, tuple):
+                return tuple(promote(item) for item in value)
+            if isinstance(value, dict):
+                return {key: promote(item) for key, item in value.items()}
+            return value
+
+        return Prefix(promote(self.args), promote(self.kwargs))
+
 
 class LastLayerSplit:
     """Run the decoder up to its last layer once, and the last layer (+ norm, head) repeatedly.

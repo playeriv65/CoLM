@@ -140,6 +140,7 @@ def test_train_callback_and_standalone_cli_agree(tmp_path, tokenizer, mixture_fi
         "lora_target_modules": ["q_proj", "k_proj", "v_proj", "fc1", "fc2"],
         "use_cpu": True,
         "precision": "fp32",
+        "selection_prefix_dtype": "float32",
         "save_strategy": "no",
         "holdout_size": 8,
         "holdout_seed": 1,

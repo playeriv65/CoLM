@@ -33,6 +33,7 @@ def make_args(out, **kw) -> TrainingArguments:
         zo_dim=16,
         dataloader_num_workers=0,
         efficient_mezo=False,  # the tests name the trainer they want
+        selection_prefix_dtype="float32",  # float64 CPU fixtures use the old exact path
     )
     base.update(kw)
     return TrainingArguments(**base)
