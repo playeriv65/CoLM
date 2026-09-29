@@ -261,7 +261,17 @@ def main(argv=None):
         default=[],
         help="The worker refuses to start if HF_HOME/HF_HUB_CACHE lie under this path (repeatable).",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the jobs the queue would get; write no queue and no run directory.",
+    )
     args = parser.parse_args(argv)
+    if args.dry_run:
+        spec, base = load_spec(args.sweep)
+        for position, job in enumerate(build_jobs(spec, base, args.sweep)):
+            print(f"{position:03d}-{job['name']}: {' '.join(job['argv'])}")
+        return
     root = create_queue(args.sweep, args.queue, args.forbid_cache_prefix)
     queue = JobQueue(root)
     for path in queue.jobs("pending"):

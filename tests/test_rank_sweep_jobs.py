@@ -128,6 +128,17 @@ def test_generated_queue_dry_runs_through_the_worker(repo, capsys):
     assert f"colm.train.train {arm_dir(spec, spec['arms'][0], base)}/train_config.json" in out
 
 
+def test_create_dry_run_prints_the_jobs_and_writes_nothing(tmp_path, capsys):
+    from colm.jobs import rank_sweep
+
+    queue = tmp_path / "queues" / "sweep"
+    assert rank_sweep.main(["--sweep", SWEEP, "--queue", str(queue), "--dry-run"]) is None
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 18 and lines[0].startswith("000-evalloss-base: ")
+    assert lines[1].startswith("001-train-r128-a512: ") and lines[-1].startswith("017-summary: ")
+    assert not queue.exists()
+
+
 def _fake_arm(repo, spec, base, arm, scale):
     directory = repo / arm_dir(spec, arm, base)
     (directory / "checkpoint-1024").mkdir(parents=True, exist_ok=True)
