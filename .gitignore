@@ -161,6 +161,7 @@ cython_debug/
 # no trailing slash so the symlinks themselves are ignored)
 /data
 /out
+/cache
 /output
 /logs
 wandb/

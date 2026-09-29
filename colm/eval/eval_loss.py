@@ -34,6 +34,7 @@ from colm.data.get_training_dataset import (
 )
 from colm.data.holdout import select_examples, split_holdout
 from colm.eval.arguments import GSM8K_SET, HELDOUT_SET, HeldoutEvalArguments
+from colm.phases import CLOCK
 
 logger = logging.getLogger(__name__)
 
@@ -215,6 +216,7 @@ class EvalLossCallback(TrainerCallback):
         if not trainer.is_world_process_zero():
             return
         # Peaks are reset at the start of every training phase, so this cannot hide a training peak.
+        started = time.time()
         memory = {}
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
@@ -240,6 +242,7 @@ class EvalLossCallback(TrainerCallback):
             for name, result in results.items():
                 f.write(json.dumps({"step": step, "set": name, **result, **memory}) + "\n")
         trainer.log(logs)
+        CLOCK.add("train/eval_loss", time.time() - started)
 
 
 def add_eval_loss_callback(
@@ -248,7 +251,8 @@ def add_eval_loss_callback(
     """Register `EvalLossCallback` on `trainer` if `eval_loss_steps` is set."""
     if not eval_args.eval_loss_steps:
         return None
-    sets = build_eval_sets(eval_args, trainer.processing_class, heldout, context_length)
+    with CLOCK.detail("eval_setup/tokenise_sets"):
+        sets = build_eval_sets(eval_args, trainer.processing_class, heldout, context_length)
     callback = EvalLossCallback(
         trainer,
         sets,
@@ -319,6 +323,7 @@ def main(argv=None):
             seed=data_args.sample_data_seed,
             hf_datasets_cache_dir=data_args.hf_datasets_cache_dir,
             subset_selection=data_args.subset_selection,
+            token_cache_dir=data_args.token_cache_dir,
         )
         _, heldout = split_holdout(full, eval_args.holdout_size, eval_args.holdout_seed)
     sets = build_eval_sets(eval_args, tokenizer, heldout, context, limit=args.limit)

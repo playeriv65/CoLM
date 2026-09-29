@@ -1,3 +1,5 @@
+import hashlib
+import json
 import logging
 import os
 import random
@@ -14,6 +16,7 @@ from datasets import load_dataset
 from torch.utils.data import Dataset
 
 import colm.data.utils as utils
+from colm.phases import CLOCK
 from colm.selection.packing import Example, pack
 
 IGNORE_INDEX = -100
@@ -30,28 +33,33 @@ def get_training_dataset(
     seed=0,
     hf_datasets_cache_dir=None,
     subset_selection="use_small_sources",
+    token_cache_dir=None,
 ):
     """Training data of the files, tokenised without truncation.
 
     `context_length` is the context window of the model: an example above it is dropped (counted
-    and logged per source), never cut.
+    and logged per source), never cut. `token_cache_dir` keeps the token counts of the data, so
+    that only the first run over the same data and tokenizer tokenises it (`TokenCountCache`).
     """
-    raw_datasets = load_raw_dataset(
-        train_files,
-        sample_percentage=sample_percentage,
-        subset_index_files=subset_index_files,
-        seed=seed,
-        cache_dir=hf_datasets_cache_dir,
-        subset_selection=subset_selection,
-    )
+    with CLOCK.detail("data/read_raw"):
+        raw_datasets = load_raw_dataset(
+            train_files,
+            sample_percentage=sample_percentage,
+            subset_index_files=subset_index_files,
+            seed=seed,
+            cache_dir=hf_datasets_cache_dir,
+            subset_selection=subset_selection,
+        )
 
     if "instruction" in raw_datasets.column_names:
-        lm_datasets = SupervisedDataset(
-            list_data_dict=raw_datasets,
-            tokenizer=tokenizer,
-            template_variation=template_variation,
-            context_length=context_length,
-        )
+        with CLOCK.detail("data/tokenise"):
+            lm_datasets = SupervisedDataset(
+                list_data_dict=raw_datasets,
+                tokenizer=tokenizer,
+                template_variation=template_variation,
+                context_length=context_length,
+                cache_dir=token_cache_dir,
+            )
     else:  # pre-tokenised (LESS) formats: prompt/completion or messages
         lm_datasets = encode_data(raw_datasets, tokenizer, context_length)
 
@@ -325,6 +333,68 @@ def encode_with_messages_format(example, tokenizer):
     }
 
 
+class TokenCountCache:
+    """Persistent record of the token counts that decide which examples fit the context window.
+
+    Tokenising the 262k MathInstruct examples takes minutes and every run, evaluation and queue
+    job repeats it; the outcome is a boolean and a length per example. The file name is a hash of
+    everything the counts depend on: the texts (prompts and completions, so the data file, the
+    prompt template, the EOS token and the sampling are covered), the context limit and the
+    tokenizer (its full definition, init arguments and library versions), so a change to any of
+    them reads another file. Writes are atomic (all ranks of a run may write the same file).
+    """
+
+    VERSION = 1
+
+    def __init__(self, path: str):
+        self.path = path
+
+    @classmethod
+    def for_texts(cls, cache_dir, tokenizer, context_length: int, sources, targets):
+        """The cache of these texts, or None without `cache_dir` or for a tokenizer that cannot
+        be fingerprinted (only fast tokenizers can)."""
+        if not cache_dir:
+            return None
+        fingerprint = tokenizer_fingerprint(tokenizer)
+        if fingerprint is None:
+            logger.info("Token counts are not cached: the tokenizer cannot be fingerprinted")
+            return None
+        digest = hashlib.sha256(f"{cls.VERSION}|{context_length}|{fingerprint}|".encode())
+        for text in (*sources, *targets):
+            digest.update(len(text).to_bytes(8, "little"))
+            digest.update(text.encode())
+        return cls(os.path.join(cache_dir, f"token_counts-{digest.hexdigest()[:32]}.npz"))
+
+    def load(self) -> tuple[np.ndarray, np.ndarray] | None:
+        try:
+            with np.load(self.path) as data:
+                fits, lengths = data["fits"], data["lengths"]
+        except (OSError, ValueError, KeyError, EOFError):  # absent or unreadable: recompute
+            return None
+        logger.info(f"Token counts read from {self.path}")
+        return fits.astype(bool), lengths.astype(np.int64)
+
+    def save(self, fits: np.ndarray, lengths: np.ndarray) -> None:
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        tmp = f"{self.path}.{os.getpid()}.tmp"
+        with open(tmp, "wb") as f:
+            np.savez(f, fits=fits, lengths=lengths.astype(np.int32))
+        os.replace(tmp, self.path)
+        logger.info(f"Token counts written to {self.path}")
+
+
+def tokenizer_fingerprint(tokenizer) -> str | None:
+    """Text that changes whenever the token ids of a text can change; None for slow tokenizers."""
+    backend = getattr(tokenizer, "backend_tokenizer", None)
+    if backend is None:
+        return None
+    import tokenizers
+
+    init = json.dumps(tokenizer.init_kwargs, sort_keys=True, default=str)
+    versions = f"transformers={transformers.__version__} tokenizers={tokenizers.__version__}"
+    return "\n".join([type(tokenizer).__name__, versions, init, backend.to_str()])
+
+
 class SupervisedDataset(Dataset):
     """Prompt / completion pairs with their source, original index and completion length."""
 
@@ -334,9 +404,11 @@ class SupervisedDataset(Dataset):
         tokenizer: transformers.PreTrainedTokenizer,
         template_variation: bool,
         context_length: int,
+        cache_dir: str | None = None,
     ):
         """Examples whose prompt + completion (+ EOS) have more than `context_length` tokens are
-        dropped (counted and logged per source), never truncated."""
+        dropped (counted and logged per source), never truncated. With `cache_dir` the token
+        counts are read from / written to a `TokenCountCache`."""
         super().__init__()
         prompts = (
             utils.PROMPT_TEMPLATE[random.randrange(len(utils.PROMPT_TEMPLATE))]
@@ -365,7 +437,7 @@ class SupervisedDataset(Dataset):
             self.indices.append(example.get("original_index", -1))
             self.completion_lengths.append(example.get("completion_length", -1))
         logger.info(f"Discarded {discarded} examples with an empty output")
-        self._drop_too_long(tokenizer, names, context_length)
+        self._drop_too_long(tokenizer, names, context_length, cache_dir)
 
         # Data source names as integers, in sorted order.
         self.all_data_sources = sorted(set(names))
@@ -374,8 +446,33 @@ class SupervisedDataset(Dataset):
         self.data_sources = [ids[name] for name in names]
         self.num_sources = len(ids)
 
-    def _drop_too_long(self, tokenizer, names, context_length: int) -> None:
+    def _drop_too_long(
+        self, tokenizer, names, context_length: int, cache_dir: str | None = None
+    ) -> None:
         """Keep the examples that fit in `context_length` tokens (and have a completion to learn)."""
+        cache = TokenCountCache.for_texts(
+            cache_dir, tokenizer, context_length, self.sources, self.targets
+        )
+        counts = cache.load() if cache else None
+        if counts is None:
+            counts = self._count_tokens(tokenizer, context_length)
+            if cache:
+                cache.save(*counts)
+        fits, lengths = counts
+        dropped = Counter(name for name, fit in zip(names, fits, strict=True) if not fit)
+        logger.info(
+            f"Dropped {sum(dropped.values())} of {len(fits)} examples longer than {context_length} "
+            f"tokens (never truncated): {dict(dropped)}"
+        )
+        for values in (self.sources, self.targets, names, self.indices, self.completion_lengths):
+            values[:] = [v for v, fit in zip(values, fits, strict=True) if fit]
+        kept = lengths[fits]
+        if not len(kept):
+            raise ValueError(f"no example fits the context window of {context_length} tokens")
+        self.mean_tokens = float(kept.sum()) / len(kept)
+
+    def _count_tokens(self, tokenizer, context_length: int) -> tuple[np.ndarray, np.ndarray]:
+        """(fits, lengths): whether each example fits the context window and its token count."""
         fits, lengths = [], []
         # The tokenizer's own threads (train.py turns them off for the data loader workers).
         parallelism = os.environ.get("TOKENIZERS_PARALLELISM")
@@ -391,17 +488,7 @@ class SupervisedDataset(Dataset):
                 for p, c in zip(prompts, completions, strict=True)
             ]
         os.environ["TOKENIZERS_PARALLELISM"] = parallelism or "false"
-        dropped = Counter(name for name, fit in zip(names, fits) if not fit)
-        logger.info(
-            f"Dropped {sum(dropped.values())} of {len(fits)} examples longer than {context_length} "
-            f"tokens (never truncated): {dict(dropped)}"
-        )
-        for values in (self.sources, self.targets, names, self.indices, self.completion_lengths):
-            values[:] = [v for v, fit in zip(values, fits, strict=True) if fit]
-        kept = [n for n, fit in zip(lengths, fits, strict=True) if fit]
-        if not kept:
-            raise ValueError(f"no example fits the context window of {context_length} tokens")
-        self.mean_tokens = sum(kept) / len(kept)
+        return np.array(fits, dtype=bool), np.array(lengths, dtype=np.int64)
 
     def __len__(self):
         return len(self.sources)

@@ -6,6 +6,8 @@ import sys
 import time
 from pathlib import Path
 
+from colm.phases import LAUNCH_ENV
+
 REPO = Path(__file__).resolve().parents[1]
 
 TRAIN_USAGE = """usage: colm-train [config.json] [--gpus 0,1] [--<option> <value> ...]
@@ -52,7 +54,13 @@ def train(argv: list[str] | None = None) -> int:
         "--nproc_per_node", str(processes), "-m", "colm.train.train", *argv,
     ]  # fmt: skip
     print(f"gpus={gpus} processes={processes} log={log}", flush=True)
-    env = {**os.environ, "CUDA_VISIBLE_DEVICES": gpus, "PYTHONUNBUFFERED": "1"}
+    launched = time.time()
+    env = {
+        **os.environ,
+        "CUDA_VISIBLE_DEVICES": gpus,
+        "PYTHONUNBUFFERED": "1",
+        LAUNCH_ENV: str(launched),  # lets startup.json count the launcher and torchrun start-up
+    }
     with (
         subprocess.Popen(
             command, env=env, cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
@@ -63,6 +71,10 @@ def train(argv: list[str] | None = None) -> int:
             sys.stdout.write(line)
             file.write(line)
             file.flush()
+    done = f"wall clock {time.time() - launched:.0f} s, exit code {process.returncode}"
+    print(done, flush=True)
+    with open(log, "a") as file:
+        file.write(done + "\n")
     return process.returncode
 
 

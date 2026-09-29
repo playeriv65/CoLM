@@ -24,6 +24,13 @@
       "create_target": true,
       "required": true,
       "reason": "Checkpoints and adapters written by colm.train.train (output_root=out); too large for the local NVMe."
+    },
+    {
+      "path": "cache",
+      "target": "artifacts/CoLM/cache",
+      "create_target": true,
+      "required": false,
+      "reason": "Persistent token-count cache of the training data (colm.data.get_training_dataset.TokenCountCache, token_cache_dir=cache/tokens); rebuilt when missing."
     }
   ]
 }

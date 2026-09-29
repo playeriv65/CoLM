@@ -29,6 +29,15 @@ class DataArguments:
     subset_index_files: list[str] = field(
         default_factory=list, metadata={"help": "Files with subset indices to train on."}
     )
+    token_cache_dir: str | None = field(
+        default="cache/tokens",
+        metadata={
+            "help": "Directory of the persistent token-count cache: the first run over the same "
+            "data, prompt template, context limit and tokenizer tokenises the training data, "
+            "later runs and evaluations read the counts (`cache` links to the shared artifact "
+            "disk, see external-paths.json). Empty disables the cache."
+        },
+    )
     output_root: str = field(
         default="out", metadata={"help": "Parent directory of auto-named output directories."}
     )

@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import sys
+import time
 
 import datasets
 import torch
@@ -25,12 +26,15 @@ from colm.data.get_training_dataset import SupervisedDataset, get_training_datas
 from colm.data.holdout import save_holdout_indices, split_holdout
 from colm.data.superglue import build_superglue
 from colm.eval.eval_loss import add_eval_loss_callback
+from colm.phases import CLOCK
 from colm.train.config import context_length, parse_args, resolved_config, save_resolved_config
 from colm.train.data_arguments import get_data_statistics
 from colm.train.model_arguments import add_padding_to_tokenizer
+from colm.train.phase_callback import PhaseCallback
 from colm.train.trainers import CustomTrainer, SubsetTrainer, SubsetTrainerEfficient
 
 logger = logging.getLogger(__name__)
+PHASES_FILENAME = "startup.json"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 DTYPES = {
     "float32": torch.float32,
@@ -149,16 +153,21 @@ def build_data(data_args, training_args, eval_args, tokenizer, context):
         seed=data_args.sample_data_seed,
         hf_datasets_cache_dir=data_args.hf_datasets_cache_dir,
         subset_selection=data_args.subset_selection,
+        token_cache_dir=data_args.token_cache_dir,
     )
     heldout = None
     if eval_args.holdout_size:
         if not isinstance(dataset, SupervisedDataset):
             raise ValueError("holdout_size needs an instruction/output (SupervisedDataset) file")
-        dataset, heldout = split_holdout(dataset, eval_args.holdout_size, eval_args.holdout_seed)
+        with CLOCK.detail("data/holdout"):
+            dataset, heldout = split_holdout(
+                dataset, eval_args.holdout_size, eval_args.holdout_seed
+            )
         logger.info(f"Held out {len(heldout)} examples; training on {len(dataset)}")
         if training_args.should_save:
             save_holdout_indices(heldout, training_args.output_dir)
-    get_data_statistics(dataset, is_custom_dataset=isinstance(dataset, SupervisedDataset))
+    with CLOCK.detail("data/statistics"):
+        get_data_statistics(dataset, is_custom_dataset=isinstance(dataset, SupervisedDataset))
     if isinstance(dataset, SupervisedDataset):
         collator = make_collator(training_args, tokenizer)
         for source in training_args.keep_source_ids:
@@ -177,6 +186,7 @@ def build_data(data_args, training_args, eval_args, tokenizer, context):
 
 
 def main(argv=None):
+    CLOCK.mark("imports")
     model_args, data_args, training_args, eval_args = parse_args(argv)
     if training_args.output_dir_is_auto:
         training_args.output_dir = default_output_dir(model_args, data_args, training_args)
@@ -202,6 +212,7 @@ def main(argv=None):
     logger.info(f"{training_args}\n{model_args}\n{data_args}")
 
     set_seed(training_args.seed)
+    CLOCK.mark("config")
     context = context_length(model_args)
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.tokenizer_name or model_args.model_name_or_path,
@@ -210,10 +221,13 @@ def main(argv=None):
         revision=model_args.model_revision,
     )
     add_padding_to_tokenizer(tokenizer)
+    CLOCK.mark("tokenizer")
     model = build_model(model_args, training_args, tokenizer)
+    CLOCK.mark("model_load")
     train_dataset, collator, analysis_dataset, heldout = build_data(
         data_args, training_args, eval_args, tokenizer, context
     )
+    CLOCK.mark("data")
 
     if not training_args.coreset:
         trainer_class = CustomTrainer
@@ -230,8 +244,11 @@ def main(argv=None):
         eval_dataset=analysis_dataset,
         processing_class=tokenizer,
         data_collator=collator,
+        callbacks=[PhaseCallback(CLOCK)],
     )
+    CLOCK.mark("trainer_init")
     add_eval_loss_callback(trainer, eval_args, heldout, training_args.output_dir, context)
+    CLOCK.mark("eval_setup")
     config = resolved_config(
         model_args, data_args, training_args, eval_args,
         {"context_length": context, "train_examples": len(train_dataset), **trainer.describe()},
@@ -239,8 +256,10 @@ def main(argv=None):
     logger.info(f"Resolved config:\n{json.dumps(config, indent=1, default=str)}")
     if training_args.should_save:
         save_resolved_config(config, training_args.output_dir)
+    CLOCK.mark("config_save")
 
     result = trainer.train(resume_from_checkpoint=model_args.checkpoint_path)
+    CLOCK.last = time.time()  # the loop was split into its phases by PhaseCallback
     trainer.check_replicas()
     trainer.save_model()
     metrics = result.metrics
@@ -252,6 +271,11 @@ def main(argv=None):
     trainer.log_metrics("train", metrics)
     trainer.save_metrics("train", metrics)
     trainer.save_state()
+    CLOCK.mark("final_save")
+    if trainer.is_world_process_zero():
+        CLOCK.save(
+            os.path.join(training_args.output_dir, PHASES_FILENAME), steps=trainer.state.global_step
+        )
 
 
 if __name__ == "__main__":

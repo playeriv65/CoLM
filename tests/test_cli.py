@@ -175,7 +175,8 @@ def test_train_needs_gpus_and_builds_one_torchrun(tmp_path, monkeypatch):
     assert started["command"][-5:] == ["-m", "colm.train.train", "config.json", "--max_steps", "5"]
     assert "--nproc_per_node" in started["command"] and "2" in started["command"]
     (log,) = tmp_path.glob("config-gpu2_3-np2-*.log")
-    assert log.read_text() == "line\n"
+    assert log.read_text().startswith("line\n")  # then the wall clock of the run
+    assert "exit code 0" in log.read_text() and "COLM_LAUNCH_TIME" in started["env"]
 
 
 def test_eval_accuracy_gets_the_paper_protocol(tmp_path):
