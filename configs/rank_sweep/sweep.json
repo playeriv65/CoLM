@@ -1,8 +1,12 @@
 {
     "name": "rank-sweep",
     "base_config": "configs/rank_sweep/base.json",
-    "output_root": "out/rank-sweep-v2",
-    "train_overrides": {},
+    "output_root": "out/rank-sweep-v3",
+    "train_overrides": {
+        "selection_prefix_dtype": "float16",
+        "pack_tokens": 1536,
+        "train_max_tokens": 1536
+    },
     "arms": [
         {"lora_r": 128, "lora_alpha": 512},
         {"lora_r": 16, "lora_alpha": 64},
@@ -19,11 +23,11 @@
         "max_new_tokens": 1024,
         "batch_size": 8,
         "gpu_memory_utilization": 0.9,
-        "base_output_dir": "out/rank-sweep-v2/phi-2-base/outputs",
+        "base_output_dir": "out/rank-sweep-v3/phi-2-base/outputs",
         "limit": null
     },
     "summary_notes": [
-        "Evaluations run alone on the card (vLLM at 0.9). Exception: train-r128-a512 shared GPU 0 with a concurrent vLLM job (0.3) for part of its run, so its step time is contaminated; see TODO.md."
+        "Single-GPU rank comparison with the fixed FP16 selection prefix, FP32 suffix, and 1536-token selection and training budgets. Evaluations run alone on the assigned GPU."
     ],
     "env": {
         "HF_HUB_OFFLINE": "1",

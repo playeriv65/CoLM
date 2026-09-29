@@ -44,6 +44,8 @@ def test_real_sweep_spec_is_the_agreed_design():
         config.unlink()
     assert training.max_steps == 1024 and training.micro_batch_size == 4
     assert training.pool_micro_batches == 8 and training.efficient_mezo is True
+    assert training.selection_prefix_dtype == "float16"
+    assert training.pack_tokens == 1536 and training.train_max_tokens == 1536
     assert (
         training.seed == 0
         and training.report_to == []
@@ -53,6 +55,7 @@ def test_real_sweep_spec_is_the_agreed_design():
 
 
 def test_queue_order_and_contents(repo):
+    spec, base = load_spec(SWEEP, repo)
     root = create_queue(SWEEP, "queues/sweep", ["/mnt/net"], repo)
     names = [p.name for p in JobQueue(root).jobs("pending")]
     assert names == [
@@ -84,14 +87,12 @@ def test_queue_order_and_contents(repo):
     assert (config["lora_r"], config["lora_alpha"], config["output_dir"]) == (
         16,
         64,
-        "out/rank-sweep-v2/phi-2-r16-a64-1024steps-seed0",
+        arm_dir(spec, spec["arms"][1], base),
     )
     assert config["seed"] == 0 and config["max_steps"] == 1024 and config["holdout_size"] == 1000
     acc = jobs["003-evalacc-r128-a512.json"]
     assert "--use_vllm" in acc["argv"] and "--enable_lora" in acc["argv"]
-    assert (
-        acc["argv"].count("out/rank-sweep-v2/phi-2-r128-a512-1024steps-seed0/checkpoint-512") == 1
-    )
+    assert acc["argv"].count(f"{arm_dir(spec, spec['arms'][0], base)}/checkpoint-512") == 1
     assert jobs["017-summary.json"]["gpu"] is False
     assert acc["argv"][acc["argv"].index("--gpu_memory_utilization") + 1] == "0.9"
     base_acc = jobs["016-evalacc-base.json"]
@@ -116,14 +117,12 @@ def test_existing_checkpoints_are_never_overwritten(repo):
 
 
 def test_generated_queue_dry_runs_through_the_worker(repo, capsys):
+    spec, base = load_spec(SWEEP, repo)
     root = create_queue(SWEEP, "queues/sweep", (), repo)
     assert worker.main(["--queue", str(root), "--gpu", "0", "--dry-run"]) == 0
     out = capsys.readouterr().out
     assert out.count("CUDA_VISIBLE_DEVICES=0") == 17 and "18 pending jobs" in out
-    assert (
-        "colm.train.train out/rank-sweep-v2/phi-2-r128-a512-1024steps-seed0/train_config.json"
-        in out
-    )
+    assert f"colm.train.train {arm_dir(spec, spec['arms'][0], base)}/train_config.json" in out
 
 
 def _fake_arm(repo, spec, base, arm, scale):
@@ -177,6 +176,7 @@ def test_summary_of_fake_results(repo):
     assert third["trainable_params"] is None and third["step_time_mean_s"] is None
     markdown = summarize.to_markdown(result, spec["eval"]["checkpoints"])
     assert "r128-a512" in markdown and "## Eval loss: heldout" in markdown
-    assert "| base (no LoRA) | - | 0.2500" in markdown and "contaminated" in markdown
+    assert "| base (no LoRA) | - | 0.2500" in markdown
+    assert "FP16 selection prefix" in markdown
     summarize.main(["--sweep", SWEEP], repo)
     assert (repo / spec["output_root"] / "summary.md").exists()

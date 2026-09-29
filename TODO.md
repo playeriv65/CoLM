@@ -11,12 +11,12 @@ commit / result pointer, delete them once they are recorded in docs. Optimisatio
 
 ## Next
 
-- [ ] LoRA rank sweep: r in {8, 16} vs the paper's 128. **Blocked** until the refactor is merged;
-      runs with the fixed code, i.e. with the fixes E4 (tokenisation, no
-      truncation option exists), E8 (question-grouped held-out set) and E9 (eval scoring) in `docs/errors.md`.
-      The queue was regenerated against the fixed code (`queues/rank-sweep-v2`, outputs in
-      `out/rank-sweep-v2`); the pre-refactor queue `queues/rank-sweep` and `out/rank-sweep` (old
-      tokenisation, holdout and scoring) must not be reused (deletion pending confirmation). The GPU is assigned by the user.
+- [ ] LoRA rank sweep: r in {8, 16} vs the paper's 128. The refactor is merged;
+      run the fixed code with E4 (tokenisation and no truncation), E8 (question-grouped
+      held-out set), and E9 (eval scoring) corrected (`docs/errors.md`). Use a fresh queue
+      `queues/rank-sweep-v3` and outputs in `out/rank-sweep-v3`, pinned to the
+      FP16 selection prefix, FP32 suffix, and 1536-token budgets. Earlier queues
+      and outputs must not be reused (deletion pending confirmation). GPU 2 is assigned by the user.
 - [ ] Training attention gradient precision remains a separate decision
       (`docs/errors.md`). The Phi-2 selection prefix uses fp16 while the
       perturbed final layer and loss remain fp32 (`docs/fp16-prefix.md`).
@@ -47,18 +47,18 @@ commit / result pointer, delete them once they are recorded in docs. Optimisatio
       accuracy on gsm8k / math / numglue / svamp / deepmind / simuleq for checkpoint-512 and 1024
       (vLLM, PoT + CoT backup, 0-shot); step time, training peak memory, trainable params.
       Launch (queue is generated once, the worker takes the GPU explicitly):
-      `colm-sweep create --sweep configs/rank_sweep/sweep.json --queue queues/rank-sweep-v2`
-      then `colm-sweep work --queue queues/rank-sweep-v2 --gpu <id>` in tmux window
+      `colm-sweep create --sweep configs/rank_sweep/sweep.json --queue queues/rank-sweep-v3`
+      then `colm-sweep work --queue queues/rank-sweep-v3 --gpu 2` in tmux window
       `CoLM-rank-sweep`. Job order: base eval loss, then per arm train -> eval loss -> eval accuracy,
-      then a CPU summary (`out/rank-sweep-v2/summary.{json,md}`). Results/logs: `out/rank-sweep-v2/<run>/`,
+      then a CPU summary (`out/rank-sweep-v3/summary.{json,md}`). Results/logs: `out/rank-sweep-v3/<run>/`,
       `logs/rank-sweep-<job>-r<r>-a<alpha>-<steps>steps-seed<seed>-<timestamp>.log`.
-      Estimate (optimised code: 1305 ms/step measured for r = 128, 1024 steps = ~22 min; the old
-      code had 2868 ms/step = ~49 min): ~22 min training + 4 in-training evaluations x 26 s (measured:
+      Estimate (latest r=128 one-run timing: 885 ms/step, 1024 steps = ~15 min; the old
+      code had 2868 ms/step = ~49 min): ~15 min training + 4 in-training evaluations x 26 s (measured:
       13.7 s held-out + 11.8 s GSM8K) + ~1 min load, ~20 s standalone loss job, vLLM accuracy job
       ~2.5 min engine start + PoT/CoT generation and program execution for ~10k prompts per
       checkpoint (execution alone ~43 ms x 10k = 7 min; total not yet measured, guess 15-30 min per
-      arm for both checkpoints). About 0.9 h per arm, ~4.5 h for the queue (was 1.3 h and 6.5-7 h; drop checkpoint 512
-      from `eval.checkpoints` to save ~10 min per arm). Training peak memory (maximum over the ranks,
+      arm for both checkpoints). Roughly 0.8 h per arm and 4 h for the queue; accuracy runtime
+      remains an estimate, and lower ranks may differ in step time. Training peak memory (maximum over the ranks,
       per phase) is in `memory.json` / `summary.md`.
       Smoke test of the whole chain (passed 2026-09-28 on GPU 0: train -> checkpoints -> eval loss
       -> vLLM LoRA accuracy -> summary): `configs/rank_sweep/smoke.json` (6 steps, 20 examples);
