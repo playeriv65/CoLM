@@ -68,7 +68,8 @@ commit / result pointer, delete them once they are recorded in docs. Optimisatio
 
 ## Decisions pending (user)
 
-- Precision of the recipe (fp16 attention gradients, `docs/errors.md`); D2-D4 of
+- Selection precision (F / P / H measured, recommendation in `docs/selection-precision.md`);
+  precision of the recipe (fp16 attention gradients, `docs/errors.md`); D2-D4 of
   `docs/optimization-backlog.md` (selection precision, dropout for activation reuse, 1-D facility
   location). D1 (padded divisor) is decided: mean over the example's label tokens.
 
