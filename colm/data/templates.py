@@ -266,26 +266,6 @@ class WSCTemplate(Template):
         return f"{self.verbalizer[candidate]}"
 
 
-class ReCoRDTemplate(Template):
-    # From PromptSource 1 but modified
-
-    def encode(self, sample):
-        passage = sample.data["passage"]
-        query = sample.data["query"]
-        return f'{passage}\n{query}\nQuestion: what is the "@placeholder"\nAnswer:'
-
-    def verbalize(self, sample, candidate):
-        passage = sample.data["passage"]
-        query = sample.data["query"]
-        return f'{passage}\n{query}\nQuestion: what is the "@placeholder"\nAnswer: {candidate}'
-
-    def encode_sfc(self, sample):
-        return "Answer:"
-
-    def verbalize_sfc(self, sample, candidate):
-        return f"Answer: {candidate}"
-
-
 class ReCoRDTemplateGPT3(Template):
     # From PromptSource 1 but modified
 

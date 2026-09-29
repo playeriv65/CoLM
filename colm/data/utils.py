@@ -1,11 +1,7 @@
 import contextlib
 import logging
-from typing import Any, NewType
 
 import numpy as np
-
-InputDataClass = NewType("InputDataClass", Any)
-
 
 logger = logging.getLogger(__name__)
 

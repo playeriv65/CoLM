@@ -127,9 +127,9 @@ class TrainingArguments(HFTrainingArguments):
             "help": "Packed tokens per training forward + backward. N > 0 (memory mode, default "
             "1536): the selected examples of a step are packed greedily into forwards of at most "
             "N tokens (an example longer than N goes alone; none is split or truncated) and the "
-            "gradients are accumulated; phi-2: 1536 gives 32.3 GB peak and 1382 ms per step. "
+            "gradients are accumulated; phi-2: 1536 gives 32 GB peak. "
             "0 (speed mode, unlimited): all selected examples of the step in ONE forward + "
-            "backward; phi-2: 1383 ms per step (no faster) but 57 GB peak (94 GB reserved), "
+            "backward; phi-2: no faster but 57 GB peak (94 GB reserved), "
             "so use it only with memory to spare. The step loss and gradient are the same "
             "in both modes."
         },
@@ -211,14 +211,6 @@ class TrainingArguments(HFTrainingArguments):
                 "qkvo_proj",
                 "fc",
             ],
-        },
-    )
-
-    # --- Stability ---
-    assert_finite_grad_norm: bool = field(
-        default=False,
-        metadata={
-            "help": "Fail fast when the pre-clip gradient norm is NaN/Inf (baseline trainer)."
         },
     )
 

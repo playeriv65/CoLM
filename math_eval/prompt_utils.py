@@ -57,19 +57,6 @@ def get_Guanaco_format_prompt(qas: list):
     return tmp, prefix
 
 
-def get_llama2_chat_format_prompt(qas: list):
-    tmp = (
-        "A chat between a curious human and an artificial intelligence assistant. "
-        "The assistant gives helpful, detailed, and polite answers to the user's questions. "
-    )
-
-    for q, a in qas:
-        tmp += "\n\n" + f"### Human: {q}\n### Assistant: {a}\n"
-    prefix = "\n" + "### Human: {query}\n### Assistant:"
-
-    return tmp, prefix
-
-
 def get_alpaca_format_prompt_wo_input(qas: list):
     tmp = (
         "Below is an instruction that describes a task. "
@@ -125,14 +112,6 @@ def get_short_format_prompt(qas: list):
     prefix = "\n" + "Q:\n{query}\nA:"
 
     return tmp, prefix
-
-
-def split_examples(examples: str):
-    qas = []
-    for ex in examples.split("\n\n"):
-        q, a = ex.split("\n")
-        qas.append((q, a))
-    return qas
 
 
 def get_examples(name: str, num_shots: int, pot_flag: str):

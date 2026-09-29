@@ -9,48 +9,6 @@ from utils import _strip_string, delete_extra_zero, normalize_answer
 DATASET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dataset")
 
 IGNORE_INDEX = -100
-DEFAULT_PAD_TOKEN = "[PAD]"
-DEFAULT_EOS_TOKEN = "</s>"
-DEFAULT_BOS_TOKEN = "</s>"
-DEFAULT_UNK_TOKEN = "</s>"
-
-PROMPT_DICT = {
-    "prompt_input": (
-        "Below is an instruction that describes a task, paired with an input that provides further context. "
-        "Write a response that appropriately completes the request.\n\n"
-        "### Instruction:\n{instruction}\n\n### Input:\n{input}\n\n### Response:"
-    ),
-    "prompt_no_input": (
-        "Below is an instruction that describes a task. "
-        "Write a response that appropriately completes the request.\n\n"
-        "### Instruction:\n{query}\n\n### Response:"
-    ),
-}
-
-
-def find_math_answer(s):
-
-    assert "boxed" in s
-    # s = s.replace(",", "")
-    ans = s.split("boxed")[-1]
-    if ans[0] == "{":
-        stack = 1
-        a = ""
-        for c in ans[1:]:
-            if c == "{":
-                stack += 1
-                a += c
-            elif c == "}":
-                stack -= 1
-                if stack == 0:
-                    break
-                a += c
-            else:
-                a += c
-    else:
-        a = ans.split("$")[0].strip()
-    a = _strip_string(a)
-    return a
 
 
 def extract_math_answer(pred_str):

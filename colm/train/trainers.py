@@ -75,7 +75,6 @@ class _Trainer(Trainer):
             self.model_accepts_loss_kwargs = False
         self.memory = MemoryMeter()
         self._select_seconds = 0.0
-        self._steps_taken = 0
         self._modes: dict[int, ModeSwitch] = {}
         # The attention of the training forward is the one the model was loaded with; the
         # selection forward (fp32, no gradient) switches to `selection_attn_implementation`.
@@ -267,7 +266,6 @@ class CoresetTrainer(_Trainer):
     def training_step(self, model, inputs, num_items_in_batch=None):
         if self._last_log is None:
             self._last_log = (time.perf_counter(), self.state.global_step)
-        self._steps_taken += 1
         start = time.perf_counter()
         self.memory.start()
         with self._timer.section("selection"):

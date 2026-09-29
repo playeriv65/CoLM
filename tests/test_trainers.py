@@ -118,7 +118,6 @@ def test_custom_trainer_full_batch(tmp_path, tokenizer, mixture_file):
         per_device_train_batch_size=2,
         gradient_accumulation_steps=2,
         data_selection_method="none",
-        assert_finite_grad_norm=True,
         save_indices=True,
         max_steps=MAX_STEPS,
     )
