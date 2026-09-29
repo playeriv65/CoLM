@@ -125,7 +125,7 @@ def _fake_arm(repo, spec, base, arm, scale):
     history[255]["step_time_s"] = 60.0  # step 256 contains an evaluation
     (directory / "trainer_state.json").write_text(json.dumps({"log_history": history}))
     lines = [
-        {"step": s, "set": name, "loss": scale + s / 1e4, "train_peak_before_eval_gb": 25.0}
+        {"step": s, "set": name, "loss": scale + s / 1e4, "eval_peak_gb": 2.0}
         for s in (256, 512)
         for name in ("heldout", "gsm8k")
     ]
@@ -152,7 +152,7 @@ def test_summary_of_fake_results(repo):
     assert first["trainable_params"] == 128 * 10 + 5 * 128
     assert second["trainable_params"] == 16 * 10 + 5 * 16
     assert first["step_time_mean_s"] == pytest.approx(3.0)  # step 256/257 excluded
-    assert first["train_peak_mem_gb"] == 25.0
+    assert first["train_peak_mem_gb"] == pytest.approx(21.024)  # the largest logged peak
     assert first["final_train_loss"] == pytest.approx(1.0)
     assert first["eval_loss_curve"]["heldout"][512] == pytest.approx(1.0512)
     assert first["accuracy_mean"][1024] == 0.5 and first["accuracy_mean"][512] is None

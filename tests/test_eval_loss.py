@@ -207,3 +207,29 @@ def test_train_callback_and_standalone_cli_agree(tmp_path, tokenizer, mixture_fi
     step0 = {r["set"]: r["loss"] for r in records if r["step"] == 0}
     for name, loss in step0.items():
         assert by_label["base"][name]["loss"] == pytest.approx(loss, rel=1e-4)
+
+
+def test_holdout_keeps_the_questions_of_the_heldout_set_out_of_training(tokenizer, tmp_path):
+    from colm.data.holdout import question_key
+
+    rows = []
+    for q in range(40):  # every question twice: a CoT and a PoT solution with the hint
+        for pot in (False, True):
+            rows.append(
+                {
+                    "instruction": f"What is {q} plus {q}?"
+                    + (" Let's write a program." if pot else ""),
+                    "output": f"{q + q}",
+                    "source": "pot" if pot else "cot",
+                    "original_index": len(rows),
+                }
+            )
+    path = tmp_path / "twins.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in rows))
+    data = get_training_dataset([str(path)], tokenizer=tokenizer, max_seq_length=512)
+    train, held = split_holdout(data, 10, seed=0)
+    assert len(held) == 10 and len(train) == 70
+    assert not {question_key(p) for p in held.sources} & {question_key(p) for p in train.sources}
+    assert question_key(
+        "### Instruction:\nWhat is 3 plus 3? Let's write a program.\n"
+    ) == question_key("### Instruction:\nwhat is 3 plus 3?")

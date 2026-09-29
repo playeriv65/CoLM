@@ -5,9 +5,10 @@ Packed batches hold several examples in one row, described by `cu_seq_lens_q` / 
 would build a dense `[T, T]` block mask and pay for every (query, key) pair of the row. This
 implementation, registered through `AttentionInterface`, attends inside each sequence only:
 
-* fp16 / bf16 on CUDA (training): `torch.nn.attention.varlen.varlen_attn` (flash, differentiable);
-* fp32 on CUDA (the selection forward, no gradient): the memory-efficient kernel that
-  `F.scaled_dot_product_attention` uses for fp32, called with cumulative sequence lengths;
+* fp16 / bf16 on CUDA with gradients (training): `torch.nn.attention.varlen.varlen_attn` (flash);
+  under `no_grad` it returned NaN on sm_120 (torch 2.13), so that case uses the kernel below;
+* CUDA without gradients (the fp32 selection forward): the memory-efficient kernel that
+  `F.scaled_dot_product_attention` uses, called with cumulative sequence lengths;
 * elsewhere (CPU): one `scaled_dot_product_attention` call per sequence.
 
 Inputs with a padding mask (or without `cu_seq_lens_q`) take the stock `sdpa` path.
@@ -26,7 +27,8 @@ _CAUSAL_FROM_TOP_LEFT = 1  # custom_mask_type of aten::_efficient_attention_forw
 
 def _varlen_causal(q, k, v, cu_seq_lens, max_length, scale):
     """q / k / v `[T, H, D]` of the packed token axis -> `[T, H, D]`, causal inside each sequence."""
-    if q.is_cuda and q.dtype in (torch.float16, torch.bfloat16):
+    differentiable = torch.is_grad_enabled() and q.requires_grad
+    if q.is_cuda and q.dtype in (torch.float16, torch.bfloat16) and differentiable:
         return varlen_attn(
             q,
             k,
@@ -38,7 +40,7 @@ def _varlen_causal(q, k, v, cu_seq_lens, max_length, scale):
             scale=scale,
             window_size=(-1, 0),
         )
-    if q.is_cuda and not torch.is_grad_enabled():
+    if q.is_cuda and not differentiable:
         out = torch.ops.aten._efficient_attention_forward(
             q[None],
             k[None],
@@ -87,8 +89,15 @@ def varlen_attention_forward(
     batch, heads, length, head_dim = query.shape
     if batch != 1:
         raise ValueError(f"{NAME}: packed inputs are one row, got {batch}")
+    # Under autocast the rotary embedding leaves q / k in fp32 and v in fp16: the kernels need one
+    # dtype, and the autocast one is what F.scaled_dot_product_attention would use.
+    dtype = (
+        torch.get_autocast_dtype("cuda")
+        if query.is_cuda and torch.is_autocast_enabled("cuda")
+        else torch.promote_types(torch.promote_types(query.dtype, key.dtype), value.dtype)
+    )
     # [1, H, T, D] -> [T, H, D]
-    q, k, v = (t[0].transpose(0, 1).contiguous() for t in (query, key, value))
+    q, k, v = (t[0].transpose(0, 1).contiguous().to(dtype) for t in (query, key, value))
     out = _varlen_causal(q, k, v, cu_seq_lens_q, max_length_q, scaling)
     return out[None], None  # [1, T, H, D]
 

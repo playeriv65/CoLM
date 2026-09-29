@@ -3,7 +3,7 @@ import os
 import re
 from statistics import mean
 
-from utils import _strip_string, delete_extra_zero
+from utils import _strip_string, delete_extra_zero, normalize_answer
 
 # Datasets live next to this file so that the scripts run from any working directory.
 DATASET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dataset")
@@ -168,9 +168,9 @@ def data_reader(dataset: str):
         with open(os.path.join(DATASET_DIR, dataset, f"{dataset}.json")) as f:
             json_data = json.load(f)
             for line in json_data:
-                assert isinstance(line["question"], str) and isinstance(line["question"], str), line
+                assert isinstance(line["question"], str), line
                 questions.append(line["question"])
-                answers.append(str(line["answer"]))
+                answers.append(normalize_answer(line["answer"]))
     else:
         raise ValueError("dataset is not properly defined ...")
 

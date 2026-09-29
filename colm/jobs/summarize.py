@@ -66,13 +66,7 @@ def training_stats(directory: Path, eval_steps: list[int], save_steps: list[int]
     disturbed = {s + d for s in [*eval_steps, *save_steps] for d in (0, 1)}
     clean = [h["step_time_s"] for h in rows if h["step"] not in disturbed]
     losses = [h["loss"] for h in history if "loss" in h]
-    memory = [h["peak_mem_gb"] for h in rows if "peak_mem_gb" in h]
-    # Evaluations reset the peak-memory counter; the callback records the training peak it saw.
-    memory += [
-        r["train_peak_before_eval_gb"]
-        for r in _read_jsonl(directory / EVAL_LOSS_FILENAME)
-        if "train_peak_before_eval_gb" in r
-    ]
+    memory = [h["peak_mem_gb"] for h in rows if "peak_mem_gb" in h]  # max over the ranks
     return {
         "steps_logged": len(rows),
         "step_time_mean_s": statistics.fmean(clean) if clean else None,

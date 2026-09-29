@@ -29,17 +29,12 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 DTYPES = {"float32": torch.float32, "bfloat16": torch.bfloat16, "float16": torch.float16}
 DATASETS = ["gsm8k", "svamp", "math", "numglue", "deepmind", "simuleq"]
-STOP_TOKENS = [
+STOP_TOKENS = [  # the model starting a new turn / prompt
     "Question:",
-    "Question",
     "USER:",
-    "USER",
     "ASSISTANT:",
-    "ASSISTANT",
     "Instruction:",
-    "Instruction",
     "Response:",
-    "Response",
     "### Instruction",
 ]
 MAX_NEW_TOKENS = 1024

@@ -1,5 +1,6 @@
 import contextlib
 import logging
+import os
 import random
 from collections import Counter, defaultdict
 from collections.abc import Callable, Sequence
@@ -418,16 +419,20 @@ class SupervisedDataset(Dataset):
     def _drop_too_long(self, tokenizer, names, max_length: int) -> None:
         """Keep the examples that fit in `max_length` tokens (and have a completion to learn)."""
         fits, lengths = [], []
+        # The tokenizer's own threads (train.py turns them off for the data loader workers).
+        parallelism = os.environ.get("TOKENIZERS_PARALLELISM")
+        os.environ["TOKENIZERS_PARALLELISM"] = "true"
         for start in range(0, len(self.sources), 2048):
-            prompts = tokenizer(self.sources[start : start + 2048])["input_ids"]
-            completions = tokenizer(self.targets[start : start + 2048], add_special_tokens=False)[
-                "input_ids"
-            ]
+            prompts = tokenizer(self.sources[start : start + 2048], verbose=False)["input_ids"]
+            completions = tokenizer(
+                self.targets[start : start + 2048], add_special_tokens=False, verbose=False
+            )["input_ids"]
             lengths += [len(p) + len(c) for p, c in zip(prompts, completions, strict=True)]
             fits += [
                 0 < len(c) and len(p) + len(c) <= max_length
                 for p, c in zip(prompts, completions, strict=True)
             ]
+        os.environ["TOKENIZERS_PARALLELISM"] = parallelism or "false"
         dropped = Counter(name for name, fit in zip(names, fits) if not fit)
         logger.info(
             f"Dropped {sum(dropped.values())} of {len(fits)} examples longer than {max_length} "

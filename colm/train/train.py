@@ -239,9 +239,10 @@ def main(argv=None):
     trainer.save_model()
     metrics = result.metrics
     metrics["train_samples"] = len(train_dataset)
-    if torch.cuda.is_available():
-        metrics["peak_memory_allocated_gb"] = torch.cuda.max_memory_allocated() / 1024**3
-        logger.info(f"Peak GPU memory: {metrics['peak_memory_allocated_gb']:.2f} GB")
+    memory = trainer.save_memory_report()  # peaks of every rank, not only rank 0
+    # (transformers formats every metric named `*_mem_*` as an integer number of bytes)
+    metrics.update({k.replace("_mem_", "_memory_"): v for k, v in memory.items()})
+    logger.info(f"Peak GPU memory (allocated, max over ranks): {memory.get('peak_mem_gb')} GB")
     trainer.log_metrics("train", metrics)
     trainer.save_metrics("train", metrics)
     trainer.save_state()

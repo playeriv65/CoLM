@@ -3,6 +3,7 @@
 import copy
 import json
 import os
+import re
 
 import numpy as np
 
@@ -30,20 +31,44 @@ def select_examples(dataset: SupervisedDataset, positions) -> SupervisedDataset:
     return part
 
 
+_PROGRAM_HINT = re.compile(r"let'?s write a program\.?")
+_NOT_ALNUM = re.compile(r"[^a-z0-9]+")
+
+
+def question_key(prompt: str) -> str:
+    """The question of a prompt, without the program hint and formatting: MathInstruct holds the
+    same question several times (CoT and PoT solutions, several sources)."""
+    return _NOT_ALNUM.sub(" ", _PROGRAM_HINT.sub("", prompt.lower())).strip()
+
+
 def split_holdout(
     dataset: SupervisedDataset, size: int, seed: int
 ) -> tuple[SupervisedDataset, SupervisedDataset]:
-    """Return (train, heldout); `heldout` is `size` examples drawn uniformly with `seed`.
+    """Return (train, heldout); `heldout` is `size` examples, whole groups of the same question.
 
-    The draw depends only on (len(dataset), size, seed), so every run over the same data file
-    holds out the same examples, whatever its training seed. Order of both halves is preserved.
+    Random groups are drawn with `seed` until `size` examples are held out, so no question of the
+    held-out set (in any of its solutions) is trained on. The draw depends only on the data,
+    `size` and `seed`; the order of both halves is preserved.
     """
     total = len(dataset)
     if not 0 < size < total:
         raise ValueError(f"holdout size must be in (0, {total}), got {size}")
-    chosen = set(np.random.default_rng(seed).permutation(total)[:size].tolist())
+    groups: dict[str, list[int]] = {}
+    for i, prompt in enumerate(dataset.sources):
+        groups.setdefault(question_key(prompt), []).append(i)
+    members = list(groups.values())
+    chosen, held = [], 0
+    for g in np.random.default_rng(seed).permutation(len(members)):
+        if held + len(members[g]) <= size:
+            chosen.extend(members[g])
+            held += len(members[g])
+        if held == size:
+            break
+    if held != size:
+        raise ValueError(f"cannot hold out exactly {size} examples in whole question groups")
     heldout_pos = sorted(chosen)
-    train_pos = [i for i in range(total) if i not in chosen]
+    is_held = set(heldout_pos)
+    train_pos = [i for i in range(total) if i not in is_held]
     return select_examples(dataset, train_pos), select_examples(dataset, heldout_pos)
 
 

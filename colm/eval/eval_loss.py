@@ -208,11 +208,9 @@ class EvalLossCallback(TrainerCallback):
         trainer = self.trainer
         if not trainer.is_world_process_zero():
             return
-        # The evaluation must not hide the training peak: read it, evaluate, and reset so that the
-        # logged `peak_mem_gb` keeps describing training steps only.
+        # Peaks are reset at the start of every training phase, so this cannot hide a training peak.
         memory = {}
         if torch.cuda.is_available():
-            memory["train_peak_before_eval_gb"] = torch.cuda.max_memory_allocated() / 1024**3
             torch.cuda.reset_peak_memory_stats()
         results = evaluate_sets(
             trainer.model,
@@ -224,7 +222,6 @@ class EvalLossCallback(TrainerCallback):
         )
         if torch.cuda.is_available():
             memory["eval_peak_gb"] = torch.cuda.max_memory_allocated() / 1024**3
-            torch.cuda.reset_peak_memory_stats()
         logs = {}
         for name, result in results.items():
             logs[f"eval_{name}_loss"] = round(result["loss"], 6)

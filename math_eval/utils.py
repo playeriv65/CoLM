@@ -140,7 +140,6 @@ def delete_extra_zero(n):
     try:
         n = float(n)
     except Exception:
-        print(f"None {n}")
         return n
     if isinstance(n, int):
         return str(n)
@@ -389,7 +388,7 @@ def answer_clean(dataset: str, direct_answer_trigger_for_fewshot: tuple, pred: s
         "mmlu_chemistry",
         "mmlu_biology",
     ):
-        tmp = re.findall(r"\b(A|B|C|D|E)\b", pred.upper())
+        tmp = re.findall(r"\b(A|B|C|D|E)\b", pred)
         if tmp:
             pred = tmp
         else:
@@ -398,7 +397,7 @@ def answer_clean(dataset: str, direct_answer_trigger_for_fewshot: tuple, pred: s
         pred = pred.replace(",", "")
         pred = [delete_extra_zero(s.replace(",", "")) for s in re.findall(r"-?\d+/?\.?\d*", pred)]
     elif dataset in ("numglue",):
-        tmp = re.findall(r"\b(A|B|C|D|E)\b", pred.upper())
+        tmp = re.findall(r"\b(A|B|C|D|E)\b", pred)
         if tmp:
             pred = tmp
         else:
@@ -424,7 +423,7 @@ def answer_clean(dataset: str, direct_answer_trigger_for_fewshot: tuple, pred: s
     if pred != "":
         if pred[-1] == ".":
             pred = pred[:-1]
-        if pred[-1] == "/":
+        if pred != "" and pred[-1] == "/":
             pred = pred[:-1]
     return pred
 
@@ -495,11 +494,8 @@ def execute_with_timeout(code: str, timeout: int = 5, use_process: bool = True):
 
 
 def within_eps(pred: float, gt: float):
-    eps = abs(gt) * 0.04
-    if pred >= gt - eps and pred <= gt + eps:
-        return True
-    else:
-        return False
+    """Numeric equality up to floating-point noise (the upstream 4% tolerance counted wrong answers)."""
+    return math.isclose(pred, gt, rel_tol=1e-6, abs_tol=1e-9)
 
 
 def floatify(num: str):
@@ -513,8 +509,15 @@ def floatify(num: str):
         return None
 
 
+def normalize_answer(answer) -> str:
+    """Ground truth in the form the predictions are extracted in: `1363.0` -> `1363`, `[3]` -> `3`."""
+    answer = str(answer).strip()
+    if match := re.fullmatch(r"\[\s*([^\[\],]+?)\s*\]", answer):
+        answer = match.group(1)
+    return delete_extra_zero(answer)
+
+
 def number_it(num: str):
-    print(num)
     if "frac" in num:
         pattern = r"\\frac\{([^{}]+)\}\{([^{}]+)\}"
         num = re.sub(pattern, r"\1/\2", num)
@@ -544,10 +547,7 @@ def compare_two_numbers(p, gt):
     try:
         if math.isnan(p):
             return False
-        if isinstance(gt, int):
-            return round(p) == gt
-        else:
-            return within_eps(pred=p, gt=gt)
+        return within_eps(pred=p, gt=gt)
     except Exception:
         return False
 

@@ -9,6 +9,7 @@ are the unmodified Trainer.
 """
 
 import contextlib
+import json
 import logging
 import os
 import time
@@ -32,6 +33,7 @@ from colm.selection.pool import (
 from colm.selection.select import CoresetSelector
 from colm.selection.zo import zo_parameters
 from colm.train import attention
+from colm.train.memory import MemoryMeter
 from colm.train.step_timing import StepTimer, StepTimingCallback
 
 logger = logging.getLogger(__name__)
@@ -51,6 +53,7 @@ class _Trainer(Trainer):
         self.dtype = (
             torch.float16 if self.args.fp16 else torch.bfloat16 if self.args.bf16 else torch.float32
         )
+        self.memory = MemoryMeter()
         self._select_seconds = 0.0
         self._last_log = None  # (time, global_step) of the previous loss log
         self._timer = StepTimer(self.args.profile_timing)
@@ -94,9 +97,24 @@ class _Trainer(Trainer):
                 logs["select_time_s"] = round(self._select_seconds / num_steps, 4)
             self._last_log = (now, step)
             self._select_seconds = 0.0
-            if torch.cuda.is_available():
-                logs["peak_mem_gb"] = round(torch.cuda.max_memory_allocated() / 1024**3, 3)
+            logs.update(MemoryMeter.summary(self.memory.gather()))
         super().log(logs, start_time)
+
+    def training_step(self, model, inputs, num_items_in_batch=None):
+        self.memory.start()
+        loss = super().training_step(model, inputs, num_items_in_batch)
+        self.memory.stop("train")
+        return loss
+
+    def save_memory_report(self) -> dict[str, float]:
+        """Peaks of every rank over the whole run -> `memory.json` (a collective: call on all ranks)."""
+        ranks = self.memory.gather(run=True)
+        summary = MemoryMeter.summary(ranks)
+        if self.is_world_process_zero() and summary:
+            os.makedirs(self.args.output_dir, exist_ok=True)
+            with open(os.path.join(self.args.output_dir, "memory.json"), "w") as f:
+                json.dump({"ranks": ranks, **summary}, f, indent=1)
+        return summary
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         inputs = {k: v for k, v in inputs.items() if k != META}
@@ -183,10 +201,13 @@ class CoresetTrainer(_Trainer):
         if self._last_log is None:
             self._last_log = (time.perf_counter(), self.state.global_step)
         start = time.perf_counter()
+        self.memory.start()
         with self._timer.section("selection"):
             sub_batches, total = self._select(inputs)
         self._select_seconds += time.perf_counter() - start
+        self.memory.stop("selection")
 
+        self.memory.start()
         with self._timer.section("train"):
             model.train()
             if hasattr(self.optimizer, "train") and callable(self.optimizer.train):
@@ -204,6 +225,7 @@ class CoresetTrainer(_Trainer):
                     with self._timer.section("backward"):
                         self.accelerator.backward(loss)
                 done += loss.detach()
+        self.memory.stop("train")
         # `legacy` (upstream error E5): the logged loss is divided by small_batch_ratio.
         return done / self.args.small_batch_ratio if self.args.legacy else done
 

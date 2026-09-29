@@ -9,7 +9,9 @@ RNG reseeded and parameters shifted in place, see `zo.Perturbation`), E13 (featu
 import math
 
 import torch
+from torch.nn.utils.rnn import pad_sequence
 
+from colm.selection.packing import IGNORE_INDEX, META
 from colm.selection.zo import LastLayerSplit, Perturbation, call
 
 MODEL_KEYS = ("input_ids", "attention_mask", "labels")
@@ -168,3 +170,64 @@ def build_extractor(args, model, zo_params, seed) -> Extractor:
     if args.efficient_mezo:
         return MezoEfficient(args, model, zo_params, seed)
     return EXTRACTORS[args.data_selection_unit](args, model, zo_params, seed)
+
+
+def split_examples(batch: dict, legacy: bool = False) -> list[dict]:
+    """One CPU dict per example of a micro-batch, `input_ids` / `labels` / `attention_mask` as 1-D rows.
+
+    `legacy` (upstream error, extra padding in training): rows keep the padding they got in
+    their micro-batch instead of being cut to their real length.
+    """
+    cpu = {k: v.cpu() for k, v in batch.items() if k != META}
+    meta = {k: v.cpu() for k, v in batch[META].items()}
+    examples = []
+    for i in range(len(cpu["input_ids"])):
+        row = {k: v[i] for k, v in cpu.items()}
+        if not legacy:
+            length = int(row["attention_mask"].sum())
+            row = {k: v[:length] for k, v in row.items()}
+        row[META] = {k: v[i] for k, v in meta.items()}
+        examples.append(row)
+    return examples
+
+
+def collate_examples(examples: list[dict], pad_token_id: int) -> dict:
+    """A batch of examples, right-padded to the longest."""
+    pads = {"input_ids": pad_token_id, "labels": IGNORE_INDEX, "attention_mask": 0}
+    batch = {
+        k: pad_sequence([e[k] for e in examples], batch_first=True, padding_value=v)
+        for k, v in pads.items()
+    }
+    batch[META] = {k: torch.stack([e[META][k] for e in examples]) for k in examples[0][META]}
+    return batch
+
+
+class PaddedBatching:
+    """Upstream: right-padded micro-batches. The loss is the mean over the micro-batches (each the
+    token mean of its own examples). `legacy` only."""
+
+    def __init__(self, args, pad_token_id: int):
+        self.args, self.pad_token_id = args, pad_token_id
+
+    def feature_batches(self, inputs: dict) -> list[dict]:
+        return inputs["micro_batches"]
+
+    def examples(self, inputs: dict) -> list[dict]:
+        return [e for b in inputs["micro_batches"] for e in split_examples(b, legacy=True)]
+
+    def train_batches(self, examples, weights, size: int):
+        if size == 1:
+            return [
+                (collate_examples([e], self.pad_token_id), w)
+                for e, w in zip(examples, weights, strict=True)
+            ]
+        return [
+            (collate_examples(examples[i : i + size], self.pad_token_id), 1.0)
+            for i in range(0, len(examples), size)
+        ]
+
+    def total_labels(self, examples) -> None:
+        return None
+
+    def loss(self, trainer, model, batch, weight, count: int, total) -> torch.Tensor:
+        return trainer.compute_loss(model, batch) * weight / count
