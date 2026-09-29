@@ -234,7 +234,7 @@ a forward (47.1 GB, and 57 GB for the longest real step). Unlimited is kept as a
 selection forward, 58%), so it only pays where the training forward is a larger share of the step.
 Losses differ between the runs (first loss 0.850-0.881 for identical pools) because the selection
 and the dropout masks depend on fp rounding order; one seed each, differences of 0.02 in a 60-step
-mean are that noise, not an effect of the budget. Logs: `logs/pack-budget/` of the worktree
+mean are that noise, not an effect of the budget. Logs: `logs/pack-budget-2026-09-28/` of the main worktree
 (machine-local).
 
 Census (steps 2-10, syncing CUDA calls per step): selection 166 -> 120 (88 of them are the
