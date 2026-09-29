@@ -44,12 +44,13 @@ def substitute(value, context: dict):
     return value
 
 
-def resolve_job(job: dict, gpu: str, repo: Path = REPO) -> dict:
+def resolve_job(job: dict, gpu: str, repo: Path = REPO, extra_env: dict | None = None) -> dict:
     """Job with placeholders filled in and the child environment assembled."""
     context = {"python": sys.executable, "repo": str(repo), "gpu": gpu}
     resolved = substitute(job, context)
     env = dict(os.environ)
     env.update(resolved.get("env", {}))
+    env.update(extra_env or {})
     env["PYTHONUNBUFFERED"] = "1"
     # The worker's --gpu is authoritative; a CPU-only job sees no GPU at all.
     env["CUDA_VISIBLE_DEVICES"] = gpu if resolved.get("gpu", True) else ""
@@ -58,7 +59,34 @@ def resolve_job(job: dict, gpu: str, repo: Path = REPO) -> dict:
     return resolved
 
 
-def preflight(meta: dict) -> None:
+def local_kernel_env(meta: dict) -> dict:
+    """Resolve configured kernel commits from the active local HF cache."""
+    requirements = meta.get("require_kernels", [])
+    if not requirements:
+        return {}
+    hub_cache = os.environ.get("HF_HUB_CACHE")
+    if not hub_cache:
+        hf_home = os.environ.get("HF_HOME")
+        if not hf_home:
+            raise SystemExit("preflight: HF_HOME or HF_HUB_CACHE is required for local kernels")
+        hub_cache = str(Path(hf_home) / "hub")
+    overrides = []
+    if os.environ.get("LOCAL_KERNELS"):
+        overrides.append(os.environ["LOCAL_KERNELS"])
+    for kernel in requirements:
+        repo, revision = kernel["repo"], kernel["revision"]
+        snapshot = Path(hub_cache) / f"kernels--{repo.replace('/', '--')}" / "snapshots" / revision
+        if not snapshot.is_dir():
+            raise SystemExit(
+                f"preflight: kernel {repo} commit {revision} is missing at {snapshot}; "
+                "cache the selected kernel build before starting the queue"
+            )
+        overrides.append(f"{repo}={snapshot.resolve()}")
+        _say(f"preflight: pinned kernel {repo} commit {revision} snapshot={snapshot.resolve()}")
+    return {"LOCAL_KERNELS": ":".join(overrides)}
+
+
+def preflight(meta: dict, gpu: str = "", extra_env: dict | None = None) -> None:
     """Fail before any job starts if the environment breaks the queue's requirements."""
     for name in meta.get("require_env", []):
         if not os.environ.get(name):
@@ -80,6 +108,23 @@ def preflight(meta: dict) -> None:
             if missing:
                 raise SystemExit(f"preflight: {model} is missing {missing} in the local HF cache")
             _say(f"preflight: {model} complete in the local HF cache ({len(filenames)} files)")
+    for kernel in meta.get("require_kernels", []):
+        env = dict(os.environ)
+        env.update(meta.get("preflight_env", {}))
+        env.update(extra_env or {})
+        env["HF_HUB_OFFLINE"] = "1"
+        if gpu:
+            env["CUDA_VISIBLE_DEVICES"] = gpu
+        result = subprocess.run(
+            [sys.executable, "-m", "colm.jobs.kernel_preflight", json.dumps(kernel)],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode:
+            detail = (result.stderr or result.stdout).strip()
+            raise SystemExit(f"preflight: kernel {kernel['repo']} failed offline load: {detail}")
+        _say(f"preflight: kernel {kernel['repo']} version {kernel['version']} loads offline")
 
 
 def _matches(cwd: str, pattern: str) -> bool:
@@ -111,9 +156,11 @@ def _on_signal(signum, frame):
         raise _Interrupted
 
 
-def run_job(job: dict, gpu: str, log_dir: Path, repo: Path = REPO) -> dict:
+def run_job(
+    job: dict, gpu: str, log_dir: Path, repo: Path = REPO, extra_env: dict | None = None
+) -> dict:
     """Run one job to completion; returns the result record (exit_code, wall_s, log, error)."""
-    resolved = resolve_job(job, gpu, repo)
+    resolved = resolve_job(job, gpu, repo, extra_env)
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     log_path = Path(log_dir) / f"{resolved['log_stem']}-{timestamp}.log"
     result = {"log": str(log_path), "started": _now(), "gpu": gpu, "exit_code": None, "error": None}
@@ -130,6 +177,7 @@ def run_job(job: dict, gpu: str, log_dir: Path, repo: Path = REPO) -> dict:
             f"# cwd {resolved['cwd']}\n# argv {' '.join(resolved['argv'])}\n"
             f"# env {json.dumps({k: v for k, v in job.get('env', {}).items()})}\n"
             f"# HF_HOME={os.environ.get('HF_HOME')} HF_HUB_CACHE={os.environ.get('HF_HUB_CACHE')}\n"
+            f"# LOCAL_KERNELS={resolved['env'].get('LOCAL_KERNELS')}\n"
             f"# loadavg {os.getloadavg()}\n"
         )
         sys.stdout.write(header)
@@ -180,8 +228,13 @@ def describe(job: dict, gpu: str, log_dir: Path, repo: Path = REPO) -> str:
     )
 
 
-def drain(queue: JobQueue, gpu: str, log_dir: Path, repo: Path = REPO) -> int:
-    """Run pending jobs in order until none is left; returns the number of failed jobs."""
+def drain(
+    queue: JobQueue, gpu: str, log_dir: Path, repo: Path = REPO, extra_env: dict | None = None
+) -> int:
+    """Run pending jobs in order until completion or the first failure."""
+    if queue.jobs("failed"):
+        _say("queue has failed jobs; refusing to resume dependent jobs")
+        return len(queue.jobs("failed"))
     _state["interrupted"] = False
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
@@ -197,7 +250,7 @@ def drain(queue: JobQueue, gpu: str, log_dir: Path, repo: Path = REPO) -> int:
             continue
         job = json.loads(running.read_text())
         _say(f"start {running.name} ({len(pending) - 1} more pending)")
-        result = run_job(job, gpu, log_dir, repo)
+        result = run_job(job, gpu, log_dir, repo, extra_env)
         if result["error"] == "interrupted":
             queue.requeue(running, "interrupted by signal")
             _say(f"interrupted {running.name}; requeued")
@@ -209,6 +262,11 @@ def drain(queue: JobQueue, gpu: str, log_dir: Path, repo: Path = REPO) -> int:
             f"{'done' if ok else 'FAILED'} {running.name} exit={result['exit_code']} "
             f"wall={result.get('wall_s')}s error={result['error']} log={result['log']}"
         )
+        if not ok:
+            _say(
+                f"stopped after failure; {len(queue.jobs('pending'))} dependent job(s) remain pending"
+            )
+            break
     return failures
 
 
@@ -234,9 +292,11 @@ def main(argv=None) -> int:
         return 0
     try:
         with queue.lock():
-            preflight(queue.read_meta())
+            meta = queue.read_meta()
+            extra_env = local_kernel_env(meta)
+            preflight(meta, args.gpu, extra_env)
             _say(f"queue {queue.root} gpu={args.gpu} log_dir={log_dir}")
-            failures = drain(queue, args.gpu, log_dir)
+            failures = drain(queue, args.gpu, log_dir, extra_env=extra_env)
     except QueueBusyError as exc:
         print(exc, file=sys.stderr)
         return 3

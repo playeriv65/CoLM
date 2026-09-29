@@ -12,9 +12,11 @@ commit / result pointer, delete them once they are recorded in docs. Optimisatio
 ## Next
 
 - [ ] LoRA rank sweep: r in {8, 16} vs the paper's 128. The refactor is merged;
-      run the fixed code with E4 (tokenisation and no truncation), E8 (question-grouped
+      the v3 queue stopped on a missing FlashAttention hub kernel and produced no training
+      result. The pinned local build passed offline preflight on GPU 2; the worker now stops on
+      the first failed job. Run the fixed code with E4 (tokenisation and no truncation), E8 (question-grouped
       held-out set), and E9 (eval scoring) corrected (`docs/errors.md`). Use a fresh queue
-      `queues/rank-sweep-v3` and outputs in `out/rank-sweep-v3`, pinned to the
+      `queues/rank-sweep-v4` and outputs in `out/rank-sweep-v4`, pinned to the
       FP16 selection prefix, FP32 suffix, and 1536-token budgets. Earlier queues
       and outputs must not be reused (deletion pending confirmation). GPU 2 is assigned by the user.
 - [ ] Training attention gradient precision remains a separate decision
@@ -47,10 +49,10 @@ commit / result pointer, delete them once they are recorded in docs. Optimisatio
       accuracy on gsm8k / math / numglue / svamp / deepmind / simuleq for checkpoint-512 and 1024
       (vLLM, PoT + CoT backup, 0-shot); step time, training peak memory, trainable params.
       Launch (queue is generated once, the worker takes the GPU explicitly):
-      `colm-sweep create --sweep configs/rank_sweep/sweep.json --queue queues/rank-sweep-v3`
-      then `colm-sweep work --queue queues/rank-sweep-v3 --gpu 2` in tmux window
+      `colm-sweep create --sweep configs/rank_sweep/sweep.json --queue queues/rank-sweep-v4`
+      then `colm-sweep work --queue queues/rank-sweep-v4 --gpu 2` in tmux window
       `CoLM-rank-sweep`. Job order: base eval loss, then per arm train -> eval loss -> eval accuracy,
-      then a CPU summary (`out/rank-sweep-v3/summary.{json,md}`). Results/logs: `out/rank-sweep-v3/<run>/`,
+      then a CPU summary (`out/rank-sweep-v4/summary.{json,md}`). Results/logs: `out/rank-sweep-v4/<run>/`,
       `logs/rank-sweep-<job>-r<r>-a<alpha>-<steps>steps-seed<seed>-<timestamp>.log`.
       Estimate (latest r=128 one-run timing: 885 ms/step, 1024 steps = ~15 min; the old
       code had 2868 ms/step = ~49 min): ~15 min training + 4 in-training evaluations x 26 s (measured:

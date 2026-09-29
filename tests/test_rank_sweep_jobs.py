@@ -104,6 +104,8 @@ def test_queue_order_and_contents(repo):
         assert acc["argv"][i : i + 2] == base_acc["argv"][j : j + 2]
     meta = JobQueue(root).read_meta()
     assert meta["forbidden_cache_prefixes"] == ["/mnt/net"] and "HF_HOME" in meta["require_env"]
+    assert meta["require_kernels"] == spec["require_kernels"]
+    assert meta["preflight_env"] == spec["env"]
     with pytest.raises(SystemExit, match="already has jobs"):
         create_queue(SWEEP, "queues/sweep", (), repo)
 

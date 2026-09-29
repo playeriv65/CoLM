@@ -178,12 +178,18 @@ trainer log; the step after an evaluation is longer). A saved adapter is evaluat
 ### LoRA rank sweep (queue)
 `configs/rank_sweep/sweep.json` expands into a file queue (`colm/jobs`): one JSON job per file,
 one worker drains it serially on one GPU (atomic claim by rename, `done/` / `failed/` with exit
-code, wall clock and log path; a lock file, no polling, no process-name matching).
+code, wall clock and log path; a lock file, no polling, no process-name matching). The worker
+stops at the first failed job and leaves dependent jobs pending; a queue with failures cannot be
+resumed. Before claiming any job, it checks the model cache and loads the configured FlashAttention
+hub kernel in an offline subprocess. The sweep pins the kernel repo, version and commit, while the
+worker resolves its snapshot under the active `HF_HUB_CACHE` or `HF_HOME/hub` and passes
+`LOCAL_KERNELS` to every job. The selected local build must already be cached and loadable on the
+assigned GPU. `--dry-run` only prints jobs; it does not perform this preflight.
 ```bash
-colm-sweep create --sweep configs/rank_sweep/sweep.json --queue queues/rank-sweep-v3
-colm-sweep work --queue queues/rank-sweep-v3 --gpu 0 --dry-run    # print resolved jobs
-colm-sweep work --queue queues/rank-sweep-v3 --gpu 0              # run (the GPU id is required)
-colm-sweep summary --sweep configs/rank_sweep/sweep.json       # out/rank-sweep-v3/summary.md
+colm-sweep create --sweep configs/rank_sweep/sweep.json --queue queues/rank-sweep-v4
+colm-sweep work --queue queues/rank-sweep-v4 --gpu 0 --dry-run    # print resolved jobs
+colm-sweep work --queue queues/rank-sweep-v4 --gpu 0              # run (the GPU id is required)
+colm-sweep summary --sweep configs/rank_sweep/sweep.json       # out/rank-sweep-v4/summary.md
 ```
 Design, arms and timing: `TODO.md` ("LoRA rank sweep").
 

@@ -244,6 +244,8 @@ def create_queue(sweep_path, queue_dir, forbidden_cache_prefixes=(), repo: Path 
             "local_cache_env": spec.get("local_cache_env", []),
             "forbidden_cache_prefixes": list(forbidden_cache_prefixes),
             "require_hf_files": spec.get("require_hf_files", {}),
+            "require_kernels": spec.get("require_kernels", []),
+            "preflight_env": spec.get("env", {}),
         }
     )
     return queue.root

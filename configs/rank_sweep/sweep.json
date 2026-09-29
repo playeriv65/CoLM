@@ -1,7 +1,7 @@
 {
     "name": "rank-sweep",
     "base_config": "configs/rank_sweep/base.json",
-    "output_root": "out/rank-sweep-v3",
+    "output_root": "out/rank-sweep-v4",
     "train_overrides": {
         "selection_prefix_dtype": "float16",
         "pack_tokens": 1536,
@@ -23,7 +23,7 @@
         "max_new_tokens": 1024,
         "batch_size": 8,
         "gpu_memory_utilization": 0.9,
-        "base_output_dir": "out/rank-sweep-v3/phi-2-base/outputs",
+        "base_output_dir": "out/rank-sweep-v4/phi-2-base/outputs",
         "limit": null
     },
     "summary_notes": [
@@ -44,5 +44,13 @@
             "model-00001-of-00002.safetensors",
             "model-00002-of-00002.safetensors"
         ]
-    }
+    },
+    "require_kernels": [
+        {
+            "repo": "kernels-community/flash-attn2",
+            "revision": "81fb77c12b2ad5d69380669b46739d5868614502",
+            "version": 3,
+            "symbols": ["flash_attn_func", "flash_attn_varlen_func"]
+        }
+    ]
 }

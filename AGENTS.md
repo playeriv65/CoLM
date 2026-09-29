@@ -62,7 +62,10 @@ are no other launch scripts: do not add shell wrappers, extend the entry points.
   `tasks.py`, `templates.py`); `colm/cli.py` — the entry points.
 - `colm/eval/` — teacher-forced eval loss (`eval_loss.py`: sets, `evaluate_loss`, trainer callback,
   CLI); `colm/jobs/` — file queue + the single worker, sweep expansion (`rank_sweep.py`, specs in
-  `configs/rank_sweep/`) and `summarize.py`. Queues live in the gitignored `queues/`.
+  `configs/rank_sweep/`) and `summarize.py`. Queues live in the gitignored `queues/`. The worker
+  stops on the first failure. Sweep kernel requirements are config-driven: a pinned hub snapshot
+  is resolved from the local HF cache, loaded offline before the queue starts and passed to jobs
+  through `LOCAL_KERNELS`.
 - `math_eval/` (vLLM / HF generation; `run_open.py` takes several models/datasets per process),
   `superglue_eval/` — evaluation code behind `colm-eval`.
 - `tests/equivalence/` — the tiny float64 Phi, tokenizer and data used by the tests.

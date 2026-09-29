@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from colm.jobs import worker
+from colm.jobs import kernel_preflight, worker
 from colm.jobs.file_queue import JobQueue, QueueBusyError
 
 REPO = Path(__file__).resolve().parents[1]
@@ -69,21 +69,36 @@ def test_worker_runs_in_order_with_logs_env_and_failures(tmp_path):
 
     failures = run_worker(queue, tmp_path)
 
-    assert failures == 3
-    assert marker.read_text().splitlines() == ["one 3", "two 3", "cpu "]
-    assert [p.name for p in queue.jobs("done")] == [
-        "000-first.json",
+    assert failures == 1
+    assert marker.read_text().splitlines() == ["one 3"]
+    assert [p.name for p in queue.jobs("done")] == ["000-first.json"]
+    assert [p.name for p in queue.jobs("pending")] == [
         "002-second.json",
+        "003-needs.json",
+        "004-promises.json",
         "005-cpu.json",
     ]
     failed = {p.name: json.loads(p.read_text())["result"] for p in queue.jobs("failed")}
     assert failed["001-boom.json"]["exit_code"] == 3
-    assert "missing requirement" in failed["003-needs.json"]["error"]
-    assert "missing expected output" in failed["004-promises.json"]["error"]
     log = Path(failed["001-boom.json"]["log"])
     assert log.name.startswith("test-boom-r8-a32-steps2-seed0-") and log.suffix == ".log"
     assert "about to fail" in log.read_text() and "gpu=3" in log.read_text()
     assert failed["001-boom.json"]["wall_s"] >= 0
+    assert run_worker(queue, tmp_path) == 1
+    assert marker.read_text().splitlines() == ["one 3"]
+
+
+@pytest.mark.parametrize(
+    ("field", "error"),
+    [("requires", "missing requirement"), ("expects", "missing expected output")],
+)
+def test_worker_stops_on_missing_dependency_or_output(tmp_path, field, error):
+    queue = JobQueue(tmp_path / "q")
+    queue.add(0, {**job("first", "pass"), field: [str(tmp_path / "missing")]})
+    queue.add(1, job("dependent", "pass"))
+    assert run_worker(queue, tmp_path) == 1
+    assert error in json.loads(queue.jobs("failed")[0].read_text())["result"]["error"]
+    assert [p.name for p in queue.jobs("pending")] == ["001-dependent.json"]
 
 
 def test_relative_paths_resolve_against_job_cwd(tmp_path):
@@ -178,3 +193,76 @@ def test_preflight_checks_environment_and_local_cache(monkeypatch, tmp_path):
     worker.preflight(
         {"local_cache_env": ["COLM_TEST_CACHE"], "forbidden_cache_prefixes": ["/other"]}
     )
+
+
+def test_local_kernel_preflight_is_offline_and_propagates_to_jobs(monkeypatch, tmp_path):
+    repo = "kernels-community/flash-attn2"
+    revision = "abc123"
+    snapshot = tmp_path / "hub" / "kernels--kernels-community--flash-attn2" / "snapshots" / revision
+    requirement = {"repo": repo, "revision": revision, "version": 3, "symbols": ["flash_attn_func"]}
+    meta = {"require_kernels": [requirement], "preflight_env": {"HF_HUB_OFFLINE": "0"}}
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    monkeypatch.delenv("HF_HUB_CACHE", raising=False)
+    with pytest.raises(SystemExit, match="kernel .* missing at"):
+        worker.local_kernel_env(meta)
+    snapshot.mkdir(parents=True)
+    extra_env = worker.local_kernel_env(meta)
+    assert extra_env == {"LOCAL_KERNELS": f"{repo}={snapshot}"}
+
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(worker.subprocess, "run", fake_run)
+    worker.preflight(meta, "2", extra_env)
+    argv, kwargs = calls[0]
+    assert json.loads(argv[-1]) == requirement
+    assert kwargs["env"]["HF_HUB_OFFLINE"] == "1"
+    assert kwargs["env"]["CUDA_VISIBLE_DEVICES"] == "2"
+    assert kwargs["env"]["LOCAL_KERNELS"] == f"{repo}={snapshot}"
+    assert (
+        worker.resolve_job(job("x", "pass"), "2", extra_env=extra_env)["env"]["LOCAL_KERNELS"]
+        == f"{repo}={snapshot}"
+    )
+
+    monkeypatch.setattr(
+        worker.subprocess,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1, "", "binary is broken"),
+    )
+    with pytest.raises(SystemExit, match="binary is broken"):
+        worker.preflight(meta, "2", extra_env)
+
+
+def test_missing_kernel_stops_worker_before_claiming_any_job(monkeypatch, tmp_path):
+    queue = JobQueue(tmp_path / "q")
+    queue.add(0, job("first", "pass"))
+    queue.write_meta(
+        {
+            "require_kernels": [
+                {
+                    "repo": "kernels-community/flash-attn2",
+                    "revision": "missing-commit",
+                    "version": 3,
+                }
+            ]
+        }
+    )
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    monkeypatch.delenv("HF_HUB_CACHE", raising=False)
+    with pytest.raises(SystemExit, match="missing at"):
+        worker.main(["--queue", str(queue.root), "--gpu", "2"])
+    assert [p.name for p in queue.jobs("pending")] == ["000-first.json"]
+    assert not queue.jobs("running") and not queue.jobs("failed")
+
+
+def test_kernel_loader_requires_expected_callables(monkeypatch):
+    import kernels
+
+    monkeypatch.setattr(kernels, "get_kernel", lambda repo, version: object())
+    with pytest.raises(RuntimeError, match="missing callable symbols"):
+        kernel_preflight.check(
+            {"repo": "kernels-community/flash-attn2", "version": 3, "symbols": ["flash_attn_func"]}
+        )
