@@ -56,16 +56,12 @@ class Sample:
 
 
 class Dataset:
-    mixed_set = False
     train_sep = "\n\n"
     generation = False  # whether this is a generation task
     classification = True  # whether train as classification
 
     def __init__(self, subtask=None, **kwargs) -> None:
         self.subtask = subtask
-
-    def get_task_name(self):
-        return self.subtask
 
     def load_dataset():
         raise NotImplementedError
@@ -77,64 +73,13 @@ class Dataset:
     def build_sample(self, example):
         return
 
-    def sample_train_sets(
-        self, num_train=32, num_dev=None, num_eval=None, num_train_sets=None, seed=None
-    ):
-        if seed is not None:
-            # one train/demo set using the designated seed
-            seeds = [seed]
-        elif num_train_sets is not None:
-            # num_train_sets train/demo sets
-            seeds = list(range(num_train_sets))
-        else:
-            # one train/demo set per evaluation sample
-            assert num_dev is None  # not supported
-            len_valid_samples = len(self.samples["valid"]) if num_eval is None else num_eval
-            with temp_seed(0):
-                seeds = np.random.randint(0, 10000, len_valid_samples)
-
-        train_samples = []
-        for i, set_seed in enumerate(seeds):
-            if self.mixed_set:
-                raise NotImplementedError
-                train_samples.append(
-                    self.sample_subset(data_split="valid", seed=set_seed, num=num_train, exclude=i)
-                )
-            else:
-                if num_dev is not None:
-                    train_samples.append(
-                        self.sample_subset(
-                            data_split="train", seed=set_seed, num=num_train + num_dev
-                        )
-                    )  # dev set is included at the end of train set
-                    if num_train + num_dev > len(self.samples["train"]):
-                        logger.warn("num_train + num_dev > available training examples")
-                else:
-                    train_samples.append(
-                        self.sample_subset(data_split="train", seed=set_seed, num=num_train)
-                    )
-                if num_dev is not None:
-                    logger.info(
-                        f"Sample train set {len(train_samples[-1])}/{len(self.samples['train'])}"
-                    )
-                    logger.info(f"... including dev set {num_dev} samples")
-
-        return train_samples
-
-    def sample_subset(self, data_split="train", seed=0, num=100, exclude=None):
+    def sample_subset(self, data_split="train", seed=0, num=100):
+        """`num` samples of the split in a seeded random order; all of them for `num` <= 0."""
         with temp_seed(seed):
             samples = self.samples[data_split]
-            lens = len(samples)
+            index = np.random.permutation(len(samples)).tolist()
             if num > 0:
-                index = np.random.permutation(lens).tolist()[: num if exclude is None else num + 1]
-            else:
-                index = np.random.permutation(lens).tolist()
-
-            if exclude is not None and exclude in index:
-                index.remove(exclude)
-            else:
                 index = index[:num]
-
             return [samples[i] for i in index]
 
     @property
@@ -169,7 +114,6 @@ class SST2Dataset(Dataset):
 
 class CopaDataset(Dataset):
     train_sep = "\n\n"
-    mixed_set = False
     classification = False
 
     def __init__(self, subtask=None, **kwargs) -> None:

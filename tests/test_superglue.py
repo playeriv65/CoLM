@@ -129,3 +129,17 @@ def test_task_datasets_are_namespaced_hub_ids():
 
     for name in ("SUPERGLUE", "GLUE", "BOOLQ", "SQUAD", "DROP"):
         assert "/" in getattr(tasks, name), name
+
+
+def test_sample_subset_with_num_minus_one_returns_every_sample():
+    """`num=-1` (the whole split) used to drop the last sample of the shuffled order (`index[:-1]`),
+    so every SuperGLUE task was evaluated on one example fewer than its validation split."""
+    from colm.data.tasks import Dataset
+
+    task = Dataset()
+    task.samples = {"valid": list(range(56)), "train": list(range(10))}
+    everything = task.sample_subset(data_split="valid", seed=0, num=-1)
+    assert sorted(everything) == list(range(56))
+    assert task.sample_subset(data_split="valid", seed=0, num=0) == everything
+    first = task.sample_subset(data_split="valid", seed=0, num=5)
+    assert first == everything[:5] and first != sorted(first)  # a seeded shuffle, prefix-stable
