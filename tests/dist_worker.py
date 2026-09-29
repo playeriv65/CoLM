@@ -30,10 +30,10 @@ def run(case: str, data: str, out: str, gas_scale: int = 1, steps: int = 2) -> d
     )
     trainer, model = build(args, tokenizer(), data)
     trained, reduces = [], []
-    make = trainer._sub_batches
+    make = trainer.batching.train_batches
 
-    def sub_batches(examples, weights):
-        out = make(examples, weights)
+    def sub_batches(examples, weights, size):
+        out = make(examples, weights, size)
         for batch, _ in out:
             trained.append(
                 {
@@ -43,7 +43,7 @@ def run(case: str, data: str, out: str, gas_scale: int = 1, steps: int = 2) -> d
             )
         return out
 
-    trainer._sub_batches = sub_batches
+    trainer.batching.train_batches = sub_batches
     step = trainer.training_step
 
     def training_step(model_, inputs, num_items_in_batch=None):

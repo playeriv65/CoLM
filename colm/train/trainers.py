@@ -18,17 +18,20 @@ import torch
 from transformers import Trainer
 
 from colm.data.superglue import classification_loss
+from colm.selection import legacy
+from colm.selection.batching import build_batching
 from colm.selection.features import build_extractor
+from colm.selection.packing import META
 from colm.selection.pool import (
-    META,
     all_gather_object,
     broadcast_object,
-    collate_examples,
     gather_object,
-    split_examples,
+    index_of,
+    source_of,
 )
 from colm.selection.select import CoresetSelector
 from colm.selection.zo import zo_parameters
+from colm.train import attention
 from colm.train.step_timing import StepTimer, StepTimingCallback
 
 logger = logging.getLogger(__name__)
@@ -41,9 +44,10 @@ class _Trainer(Trainer):
         super().__init__(*args, **kwargs)
         if self.args.n_gpu > 1:
             raise ValueError("one process per GPU is required: launch with torchrun")
-        # The loss of a batch is its token mean, scaled by the trainer (no token normalisation
-        # across batches).
-        self.model_accepts_loss_kwargs = False
+        if self.args.legacy or self.args.coreset:
+            # The trainer scales the loss of every batch itself (legacy: the token mean of a batch;
+            # coreset: the share of the step's token mean, see batching.py).
+            self.model_accepts_loss_kwargs = False
         self.dtype = (
             torch.float16 if self.args.fp16 else torch.bfloat16 if self.args.bf16 else torch.float32
         )
@@ -72,6 +76,14 @@ class _Trainer(Trainer):
             )
             logger.info(f"Step timing ({self.args.profile_timing}) -> {out_file}")
 
+    def _require_varlen(self) -> None:
+        """Packed sequences would attend to each other without a kernel that reads cu_seq_lens."""
+        implementation = self.model.config._attn_implementation
+        if implementation != attention.NAME:
+            raise ValueError(
+                f"packed inputs need attn_implementation={attention.NAME}, not {implementation}"
+            )
+
     def log(self, logs: dict[str, float], start_time: float | None = None) -> None:
         """Add wall-clock step time, selection time and peak memory to every loss log."""
         if "loss" in logs:
@@ -88,6 +100,9 @@ class _Trainer(Trainer):
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         inputs = {k: v for k, v in inputs.items() if k != META}
+        if "cu_seq_lens_q" in inputs:
+            self._require_varlen()
+            inputs["use_cache"] = False  # a cache would end the packed-batch detection
         if "num_options" in inputs:  # classification-style SuperGLUE tasks
             logits = model(
                 input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"]
@@ -123,6 +138,8 @@ class CoresetTrainer(_Trainer):
         if not args.coreset:
             raise ValueError("coreset trainers need data_selection_method != none")
         self._check_args()
+        if not args.legacy:
+            self._require_varlen()
         # The same seed on every rank: numpy is seeded by set_seed before the trainer is built.
         self.zo_seed = int(np.random.randint(1000000000))
         needs_params = args.efficient_mezo or args.data_selection_unit in ("mezo", "masked_grad")
@@ -131,7 +148,8 @@ class CoresetTrainer(_Trainer):
             if needs_params
             else []
         )
-        self.extractor = build_extractor(args, self.model, self.zo_params, self.zo_seed)
+        build = legacy.build_extractor if args.legacy else build_extractor
+        self.extractor = build(args, self.model, self.zo_params, self.zo_seed)
         self.selector = CoresetSelector(
             args,
             self.model.config.num_hidden_layers,
@@ -139,6 +157,12 @@ class CoresetTrainer(_Trainer):
             weight_prior=self.extractor.weight_prior if self.zo_params else None,
         )
         self.pad_token_id = self.processing_class.pad_token_id
+        self.batching = build_batching(
+            args,
+            self.pad_token_id,
+            getattr(self.train_dataset, "mean_tokens", None),
+            self.extractor.batched,
+        )
         logger.info(
             f"ZO seed {self.zo_seed}; pool {args.per_device_train_batch_size} per rank "
             f"in micro-batches of {args.micro_batch_size}, {self._per_rank(args.pool_micro_batches)} "
@@ -152,8 +176,7 @@ class CoresetTrainer(_Trainer):
     def _per_rank(self, num_micro_batches: int) -> int:
         raise NotImplementedError
 
-    def _sub_batches(self, examples: list[dict], weights: list[float]):
-        raise NotImplementedError
+    train_size = 1  # examples per trained sub-batch (legacy padded batching only)
 
     # ----- one optimizer step ---------------------------------------------------------------
     def training_step(self, model, inputs, num_items_in_batch=None):
@@ -161,44 +184,49 @@ class CoresetTrainer(_Trainer):
             self._last_log = (time.perf_counter(), self.state.global_step)
         start = time.perf_counter()
         with self._timer.section("selection"):
-            sub_batches = self._select(inputs["micro_batches"])
+            sub_batches, total = self._select(inputs)
         self._select_seconds += time.perf_counter() - start
 
         with self._timer.section("train"):
             model.train()
             if hasattr(self.optimizer, "train") and callable(self.optimizer.train):
                 self.optimizer.train()  # schedule-free optimizers
-            total = torch.zeros((), device=self.args.device)
+            done = torch.zeros((), device=self.args.device)
             for i, (batch, weight) in enumerate(sub_batches):
                 batch = self._prepare_inputs(batch)
                 # One gradient all-reduce per optimizer step: on the last sub-batch only.
                 last = i == len(sub_batches) - 1
                 with contextlib.nullcontext() if last else self.accelerator.no_sync(model):
                     with self._timer.section("forward"), self.compute_loss_context_manager():
-                        loss = self.compute_loss(model, batch) * weight / len(sub_batches)
+                        loss = self.batching.loss(
+                            self, model, batch, weight, len(sub_batches), total
+                        )
                     with self._timer.section("backward"):
                         self.accelerator.backward(loss)
-                total += loss.detach()
+                done += loss.detach()
         # `legacy` (upstream error E5): the logged loss is divided by small_batch_ratio.
-        return total / self.args.small_batch_ratio if self.args.legacy else total
+        return done / self.args.small_batch_ratio if self.args.legacy else done
 
-    def _select(self, micro_batches: list[dict]):
+    def _select(self, inputs: dict):
         args, t = self.args, self._timer
         if self.extractor.mode is not None:
             self.model.train(self.extractor.mode == "train")
         with t.section("features"):
-            values = torch.cat([self._features(b) for b in micro_batches])
-            examples = [e for b in micro_batches for e in split_examples(b, args.legacy)]
+            batches = [self._prepare_inputs(b) for b in self.batching.feature_batches(inputs)]
+            values = torch.cat([self._features(b) for b in batches])
+            examples = self.batching.examples(inputs)
             if self.drop_invalid:
                 valid = (
                     values != 0
                     if values.dim() == 1
                     else (~torch.isnan(values).any(dim=1) & (torch.norm(values, dim=1) != 0))
                 )
-                examples = [e for e, ok in zip(examples, valid.tolist()) if ok]
+                examples = [e for e, ok in zip(examples, valid.tolist(), strict=True) if ok]
                 values = values[valid]
             values = values.cpu()
-        per_rank = self._per_rank(len(micro_batches))
+        per_rank = self._per_rank(
+            args.pool_micro_batches if not args.legacy else len(inputs["micro_batches"])
+        )
         world, rank = args.world_size, args.process_index
         with t.section("gather"):
             pool = [e for chunk in all_gather_object(examples) for e in chunk]
@@ -207,8 +235,9 @@ class CoresetTrainer(_Trainer):
         if rank == 0:
             with t.section("select"):
                 feats = torch.cat(gathered).to(args.device)
-                sources = [int(e[META]["sources"]) for e in pool]
-                chosen = self.selector(feats, sources, per_rank * world, self.state.global_step)
+                chosen = self.selector(
+                    feats, [source_of(e) for e in pool], per_rank * world, self.state.global_step
+                )
                 if args.save_indices:
                     self._save_indices(pool, chosen)
                 selection = (chosen.indices, chosen.weights)
@@ -221,13 +250,15 @@ class CoresetTrainer(_Trainer):
             if args.legacy
             else slice(rank, None, world)
         )
-        return self._sub_batches([pool[i] for i in indices[mine]], weights[mine])
+        total = self.batching.total_labels([pool[i] for i in indices])
+        chosen_examples = [pool[i] for i in indices[mine]]
+        return self.batching.train_batches(chosen_examples, weights[mine], self.train_size), total
 
     def _features(self, batch: dict) -> torch.Tensor:
         values = self.extractor.extract(batch)
-        if self.extractor.scalar and values.dtype.is_floating_point:
+        if self.args.legacy and self.extractor.scalar and values.dtype.is_floating_point:
             # `legacy` (upstream error E14): scalar features in the AMP dtype (fp16 squares overflow).
-            values = values.to(self.dtype if self.args.legacy else torch.float32)
+            values = values.to(self.dtype)
         if self.extractor.batched:
             values = values.float()
         return values
@@ -242,7 +273,7 @@ class CoresetTrainer(_Trainer):
         v = torch.cat([state[p]["exp_avg_sq"].flatten() for p in params])
         return m, v
 
-    def _save_indices(self, pool: list[dict], chosen) -> None:
+    def _save_indices(self, pool: list, chosen) -> None:
         directory = os.path.join(self.args.output_dir, INDICES_DIRNAME)
         os.makedirs(directory, exist_ok=True)
         for name, positions in [
@@ -251,7 +282,7 @@ class CoresetTrainer(_Trainer):
             ("selected", chosen.indices),
         ]:
             wanted = set(int(i) for i in positions)
-            original = [int(e[META]["indices"]) for i, e in enumerate(pool) if i in wanted]
+            original = [index_of(e) for i, e in enumerate(pool) if i in wanted]
             torch.save(
                 original, os.path.join(directory, f"iter{self.state.global_step}_{name}_indices.pt")
             )
@@ -264,6 +295,7 @@ class SubsetTrainer(CoresetTrainer):
     """
 
     drop_invalid = True
+    train_size = 1
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -275,15 +307,9 @@ class SubsetTrainer(CoresetTrainer):
     def _per_rank(self, num_micro_batches: int) -> int:
         return max(1, int(num_micro_batches * self.args.small_batch_ratio))
 
-    def _sub_batches(self, examples, weights):
-        return [
-            (collate_examples([e], self.pad_token_id), w)
-            for e, w in zip(examples, weights, strict=True)
-        ]
-
 
 class SubsetTrainerEfficient(CoresetTrainer):
-    """Batched last-layer MeZO (the paper's method): micro-batches of `micro_batch_size` examples."""
+    """Batched last-layer MeZO (the paper's method): several examples per forward."""
 
     def _check_args(self):
         args = self.args
@@ -296,12 +322,9 @@ class SubsetTrainerEfficient(CoresetTrainer):
         if int(args.micro_batch_size * args.small_batch_ratio) < 1:
             raise ValueError("micro_batch_size * small_batch_ratio must be >= 1")
 
-    def _per_rank(self, num_micro_batches: int) -> int:
-        return num_micro_batches * int(self.args.micro_batch_size * self.args.small_batch_ratio)
+    @property
+    def train_size(self) -> int:
+        return int(self.args.micro_batch_size * self.args.small_batch_ratio)
 
-    def _sub_batches(self, examples, weights):
-        size = int(self.args.micro_batch_size * self.args.small_batch_ratio)
-        return [
-            (collate_examples(examples[i : i + size], self.pad_token_id), 1.0)
-            for i in range(0, len(examples), size)
-        ]
+    def _per_rank(self, num_micro_batches: int) -> int:
+        return num_micro_batches * self.train_size

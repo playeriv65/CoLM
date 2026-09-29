@@ -13,7 +13,11 @@ class DataArguments:
         default=None, metadata={"help": "datasets cache override (default: $HF_HOME)."}
     )
     max_seq_length: int | None = field(
-        default=512, metadata={"help": "Maximum total input sequence length after tokenization."}
+        default=None,
+        metadata={
+            "help": "Optional cap on prompt + completion tokens (default: the model's context "
+            "window). Examples above it are dropped, never truncated."
+        },
     )
     sample_data_seed: int = field(default=42, metadata={"help": "Seed used for data sampling."})
     percentage: float = field(default=1.0, metadata={"help": "Sampling percentage of the data."})

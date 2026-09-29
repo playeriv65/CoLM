@@ -1,8 +1,8 @@
 import contextlib
 import logging
 import random
-from collections import defaultdict
-from collections.abc import Sequence
+from collections import Counter, defaultdict
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from functools import partial
 
@@ -14,6 +14,7 @@ from datasets import load_dataset
 from torch.utils.data import Dataset
 
 import colm.data.utils as utils
+from colm.selection.packing import Example, pack
 
 IGNORE_INDEX = -100
 logger = logging.getLogger(__name__)
@@ -33,14 +34,14 @@ def temp_seed(seed):
 def get_training_dataset(
     train_files: list[str],
     tokenizer,
-    max_seq_length,
+    max_seq_length=None,
     sample_percentage=1.0,
     subset_index_files=None,
     template_variation=False,
     seed=0,
     hf_datasets_cache_dir=None,
 ):
-    """get training dataset with a specified seed"""
+    """Training data of the files. `max_seq_length`: examples that do not fit are dropped, never cut."""
     raw_datasets = load_raw_dataset(
         train_files,
         sample_percentage=sample_percentage,
@@ -51,10 +52,15 @@ def get_training_dataset(
 
     if "instruction" in raw_datasets.column_names:
         lm_datasets = SupervisedDataset(
-            list_data_dict=raw_datasets, tokenizer=tokenizer, template_variation=template_variation
+            list_data_dict=raw_datasets,
+            tokenizer=tokenizer,
+            template_variation=template_variation,
+            max_length=max_seq_length,
         )
-    else:
-        lm_datasets = encode_data(raw_datasets, tokenizer, max_seq_length)
+    else:  # pre-tokenised (LESS) formats are cut at max_seq_length
+        lm_datasets = encode_data(
+            raw_datasets, tokenizer, max_seq_length or tokenizer.model_max_length
+        )
 
     return lm_datasets
 
@@ -368,7 +374,9 @@ class SupervisedDataset(Dataset):
         list_data_dict: datasets.arrow_dataset.Dataset,
         tokenizer: transformers.PreTrainedTokenizer,
         template_variation: bool,
+        max_length: int | None = None,
     ):
+        """`max_length`: drop the examples whose prompt + completion (+ EOS) have more tokens."""
         super().__init__()
         prompts = (
             utils.PROMPT_TEMPLATE[random.randrange(len(utils.PROMPT_TEMPLATE))]
@@ -397,6 +405,8 @@ class SupervisedDataset(Dataset):
             self.indices.append(example.get("original_index", -1))
             self.completion_lengths.append(example.get("completion_length", -1))
         logger.info(f"Discarded {discarded} examples with an empty output")
+        if max_length is not None:
+            self._drop_too_long(tokenizer, names, max_length)
 
         # Data source names as integers, in sorted order.
         self.all_data_sources = sorted(set(names))
@@ -404,6 +414,29 @@ class SupervisedDataset(Dataset):
         logger.info(f"Data sources: {ids}")
         self.data_sources = [ids[name] for name in names]
         self.num_sources = len(ids)
+
+    def _drop_too_long(self, tokenizer, names, max_length: int) -> None:
+        """Keep the examples that fit in `max_length` tokens (and have a completion to learn)."""
+        fits, lengths = [], []
+        for start in range(0, len(self.sources), 2048):
+            prompts = tokenizer(self.sources[start : start + 2048])["input_ids"]
+            completions = tokenizer(self.targets[start : start + 2048], add_special_tokens=False)[
+                "input_ids"
+            ]
+            lengths += [len(p) + len(c) for p, c in zip(prompts, completions, strict=True)]
+            fits += [
+                0 < len(c) and len(p) + len(c) <= max_length
+                for p, c in zip(prompts, completions, strict=True)
+            ]
+        dropped = Counter(name for name, fit in zip(names, fits) if not fit)
+        logger.info(
+            f"Dropped {sum(dropped.values())} of {len(fits)} examples longer than {max_length} "
+            f"tokens (never truncated): {dict(dropped)}"
+        )
+        for values in (self.sources, self.targets, names, self.indices, self.completion_lengths):
+            values[:] = [v for v, fit in zip(values, fits, strict=True) if fit]
+        kept = [n for n, fit in zip(lengths, fits, strict=True) if fit]
+        self.mean_tokens = sum(kept) / len(kept)
 
     def __len__(self):
         return len(self.sources)
@@ -478,10 +511,51 @@ class SupervisedCollator:
         )
 
 
+def tokenize_examples(tokenizer, instances: Sequence[dict]) -> list[Example]:
+    """Prompt and completion tokenised separately and concatenated: the tokens of the prompt are
+    exactly those of the prompt alone, as at inference, and nothing is truncated."""
+    prompts = tokenizer([i["input_ids"] for i in instances])["input_ids"]
+    completions = tokenizer([i["labels"] for i in instances], add_special_tokens=False)["input_ids"]
+    return [
+        Example(
+            input_ids=np.array(p + c),
+            labels=np.array([IGNORE_INDEX] * len(p) + c),
+            source=i["sources"],
+            index=i["indices"],
+            completion_length=i["completion_lengths"],
+        )
+        for i, p, c in zip(instances, prompts, completions, strict=True)
+    ]
+
+
+@dataclass
+class ExampleCollator:
+    """The selection pool of a step as tokenised examples (packed later, per forward)."""
+
+    make_examples: Callable[[Sequence[dict]], list[Example]]
+
+    def __call__(self, instances: Sequence[dict]) -> dict:
+        examples = self.make_examples(instances)
+        return {"lengths": torch.tensor([len(e) for e in examples]), "examples": examples}
+
+
+@dataclass
+class PackCollator:
+    """One packed batch (`colm.selection.packing`): the batches of the full-batch baseline."""
+
+    make_examples: Callable[[Sequence[dict]], list[Example]]
+
+    def __call__(self, instances: Sequence[dict]) -> dict:
+        return pack(self.make_examples(instances))
+
+
 def make_collator(args, tokenizer):
-    """The collator of a MathInstruct-style run: pools for coreset training, batches otherwise."""
-    collate = SupervisedCollator(tokenizer, legacy=args.legacy)
-    return PoolCollator(collate, args.micro_batch_size) if args.coreset else collate
+    """The collator of a MathInstruct-style run."""
+    if args.legacy:
+        collate = SupervisedCollator(tokenizer, legacy=True)
+        return PoolCollator(collate, args.micro_batch_size) if args.coreset else collate
+    make = partial(tokenize_examples, tokenizer)
+    return ExampleCollator(make) if args.coreset else PackCollator(make)
 
 
 @dataclass

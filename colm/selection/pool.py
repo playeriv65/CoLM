@@ -4,8 +4,7 @@ import torch
 import torch.distributed as dist
 from torch.nn.utils.rnn import pad_sequence
 
-IGNORE_INDEX = -100
-META = "colm_meta"  # key of the per-example bookkeeping tensors inside a batch
+from colm.selection.packing import IGNORE_INDEX, META
 
 
 # ----- collectives that degrade to no-ops in a single process -----------------------------
@@ -67,3 +66,11 @@ def collate_examples(examples: list[dict], pad_token_id: int) -> dict:
     }
     batch[META] = {k: torch.stack([e[META][k] for e in examples]) for k in examples[0][META]}
     return batch
+
+
+def source_of(example) -> int:
+    return int(example[META]["sources"]) if isinstance(example, dict) else example.source
+
+
+def index_of(example) -> int:
+    return int(example[META]["indices"]) if isinstance(example, dict) else example.index

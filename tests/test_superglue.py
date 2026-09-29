@@ -7,13 +7,15 @@ import torch
 import torch.nn.functional as F
 from equivalence.helpers import make_args, model_fp64
 
-from colm.data.get_training_dataset import PoolCollator
+from colm.data.get_training_dataset import ExampleCollator
 from colm.data.superglue import (
     ClassificationCollator,
     ListDataset,
     OptionCollator,
     classification_loss,
+    option_examples,
 )
+from colm.train import attention
 from colm.train.trainers import CustomTrainer, SubsetTrainer
 
 
@@ -21,22 +23,21 @@ def _ids(tokenizer, text):
     return tokenizer(text)["input_ids"]
 
 
-def test_option_collator_masks_the_prompt(tokenizer):
+def test_option_examples_mask_the_prompt(tokenizer):
     short, long = _ids(tokenizer, "abc de"), _ids(tokenizer, "abc def ghi")
     features = [
         {"input_ids": short, "option_len": 2, "sources": 1, "indices": 0},
         {"input_ids": long, "option_len": 3, "sources": 2, "indices": 1},
     ]
-    batch = OptionCollator(tokenizer.pad_token_id)(features)
-    labels = batch["labels"]
-    assert (labels[0] != -100).sum() == 2 and labels[0][
-        len(short) - 2 : len(short)
-    ].tolist() == short[-2:]
-    assert (labels[1] != -100).sum() == 3
-    assert batch["colm_meta"]["sources"].tolist() == [1, 2]
+    examples = option_examples(features)
+    assert [e.num_labels for e in examples] == [2, 3]  # the first token is never predicted
+    assert (
+        examples[0].labels[-2:].tolist() == short[-2:] and (examples[0].labels[:-2] == -100).all()
+    )
+    assert [e.source for e in examples] == [1, 2] and examples[1].completion_length == 3
     # legacy (E16): counted back from the padded width, the shorter example loses tokens
-    legacy = OptionCollator(tokenizer.pad_token_id, legacy=True)(features)["labels"]
-    assert (legacy[0] != -100).sum() < 2 and torch.equal(legacy[1], labels[1])
+    padded = OptionCollator(tokenizer.pad_token_id)(features)["labels"]
+    assert (padded[0] != -100).sum() < 2 and (padded[1] != -100).sum() == 3
 
 
 def _candidates(tokenizer, texts, option_len, label):
@@ -118,11 +119,11 @@ def test_generation_task_with_selection(tmp_path, tokenizer, unit):
         max_steps=2,
     )
     trainer = SubsetTrainer(
-        model=model_fp64(tokenizer),
+        model=model_fp64(tokenizer, attn=attention.register()),
         args=args,
         train_dataset=ListDataset(data),
         processing_class=tokenizer,
-        data_collator=PoolCollator(OptionCollator(tokenizer.pad_token_id), args.micro_batch_size),
+        data_collator=ExampleCollator(option_examples),
     )
     trainer.train()
     assert trainer.state.global_step == 2

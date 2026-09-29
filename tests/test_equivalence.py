@@ -15,8 +15,9 @@ from colm.data.get_training_dataset import (
     get_training_dataset,
 )
 from colm.selection import pool as pool_module
+from colm.selection.legacy import per_sample_loss
 from colm.selection.select import CoresetSelector
-from colm.selection.zo import per_sample_loss, zo_parameters
+from colm.selection.zo import zo_parameters
 from colm.train import trainers
 
 LEGACY = dict(legacy=True)
@@ -114,8 +115,10 @@ def test_efficient_features_and_losses(tmp_path, tokenizer, mixture_file):
         assert_same(trainer.extractor.extract(batch), want)
     split = trainer.extractor.split
     with torch.no_grad():
-        state = split.prefix(batches[0]["input_ids"], batches[0]["attention_mask"])
-        loss = per_sample_loss(split.logits(state), batches[0]["labels"], legacy=True)
+        state = split.prefix(
+            input_ids=batches[0]["input_ids"], attention_mask=batches[0]["attention_mask"]
+        )
+        loss = per_sample_loss(split.logits(state), batches[0]["labels"])
     assert_same(loss, golden["efficient_loss"])
     assert_same(lora_state(model), golden["efficient_param"], "parameters after the estimate")
 
@@ -199,10 +202,10 @@ def test_training_trajectory(tmp_path, tokenizer, mixture_file, monkeypatch, nam
             return out
 
         monkeypatch.setattr(trainers, "all_gather_object", record_pool)
-        sub_batches = trainer._sub_batches
+        train_batches = trainer.batching.train_batches
 
-        def record_sub_batches(examples, weights):
-            out = sub_batches(examples, weights)
+        def record_sub_batches(examples, weights, size):
+            out = train_batches(examples, weights, size)
             for batch, weight in out:
                 trained.append(
                     {
@@ -213,7 +216,7 @@ def test_training_trajectory(tmp_path, tokenizer, mixture_file, monkeypatch, nam
                 )
             return out
 
-        trainer._sub_batches = record_sub_batches
+        trainer.batching.train_batches = record_sub_batches
         loss_fn = trainer.compute_loss
 
         def compute_loss(model, inputs, **kw):

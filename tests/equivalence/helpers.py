@@ -5,6 +5,7 @@ import pathlib
 import torch
 
 from colm.data.get_training_dataset import get_training_dataset, make_collator
+from colm.train import attention
 from colm.train.trainers import CustomTrainer, SubsetTrainer, SubsetTrainerEfficient
 from colm.train.training_arguments import TrainingArguments
 from equivalence.fixtures import NUM_LAYERS, mixture, model_fp64, tokenizer
@@ -44,7 +45,8 @@ def trainer_class(args):
 
 
 def build(args, tok, data, lora_dropout=0.0, model=None):
-    model = model or model_fp64(tok, lora_dropout=lora_dropout)
+    attn = "sdpa" if args.legacy else attention.register()
+    model = model or model_fp64(tok, lora_dropout=lora_dropout, attn=attn)
     dataset = get_training_dataset([data], tokenizer=tok, max_seq_length=512)
     trainer = trainer_class(args)(
         model=model,

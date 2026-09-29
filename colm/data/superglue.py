@@ -11,6 +11,7 @@ import logging
 import os
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
@@ -18,8 +19,9 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 
 import colm.data.utils as utils
+from colm.data.get_training_dataset import ExampleCollator, PackCollator, PoolCollator
 from colm.data.tasks import Sample, get_task
-from colm.selection.pool import IGNORE_INDEX, META
+from colm.selection.packing import IGNORE_INDEX, META, Example
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,9 @@ logger = logging.getLogger(__name__)
 class ListDataset(Dataset):
     def __init__(self, data):
         self.data = data
+        # Classification examples are lists of candidate sequences.
+        sequences = [c for x in data for c in (x if isinstance(x, list) else [x])]
+        self.mean_tokens = sum(len(c["input_ids"]) for c in sequences) / len(sequences)
 
     def __len__(self):
         return len(self.data)
@@ -78,22 +83,38 @@ def convert_samples(samples, task, tokenizer, max_length, max_new_tokens, only_t
     return data
 
 
+def option_examples(features: list[dict]) -> list[Example]:
+    """Packed-batch examples of generation-style samples: only the option is a label."""
+    examples = []
+    for f in features:
+        ids = np.array(f["input_ids"])
+        labels = ids.copy()
+        if "option_len" in f:
+            labels[: len(ids) - f["option_len"]] = IGNORE_INDEX
+        examples.append(
+            Example(ids, labels, int(f["sources"]), f["indices"], f.get("option_len", -1))
+        )
+    return examples
+
+
 @dataclass
 class OptionCollator:
-    """Batch of generation-style examples; the labels of the prompt (before the option) are -100."""
+    """Padded batch of generation-style examples (`legacy`); the labels of the prompt are -100.
+
+    Upstream error E16: the option is counted back from the padded width, so the option of a
+    shorter example loses its first tokens.
+    """
 
     pad_token_id: int
-    legacy: bool = False
 
     def __call__(self, features: list[dict]) -> dict:
         ids = [torch.tensor(f["input_ids"]) for f in features]
         labels = [x.clone() for x in ids]
         input_ids = pad_sequence(ids, batch_first=True, padding_value=self.pad_token_id)
         width = input_ids.shape[1]
-        for row, f in zip(labels, features):
+        for row, f in zip(labels, features, strict=True):
             if "option_len" in f:
-                # `legacy` (upstream error E16): the option is counted back from the padded width.
-                row[: (width if self.legacy else len(row)) - f["option_len"]] = IGNORE_INDEX
+                row[: width - f["option_len"]] = IGNORE_INDEX
         lengths = torch.tensor([len(x) for x in ids])
         return {
             "input_ids": input_ids,
@@ -165,7 +186,7 @@ def build_superglue(model_args, data_args, training_args, tokenizer):
         samples,
         task,
         tokenizer,
-        model_args.model_max_length,
+        tokenizer.model_max_length,
         training_args.max_new_tokens,
         training_args.only_train_option,
     )
@@ -177,9 +198,10 @@ def build_superglue(model_args, data_args, training_args, tokenizer):
             raise ValueError("classification tasks train with data_selection_method=none only")
         collator = ClassificationCollator(tokenizer.pad_token_id)
     else:
-        from colm.data.get_training_dataset import PoolCollator
-
-        collator = OptionCollator(tokenizer.pad_token_id, training_args.legacy)
-        if training_args.coreset:
-            collator = PoolCollator(collator, training_args.micro_batch_size)
+        if training_args.legacy:
+            collator = OptionCollator(tokenizer.pad_token_id)
+            if training_args.coreset:
+                collator = PoolCollator(collator, training_args.micro_batch_size)
+        else:
+            collator = (ExampleCollator if training_args.coreset else PackCollator)(option_examples)
     return ListDataset(data), collator, None

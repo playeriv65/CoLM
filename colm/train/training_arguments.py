@@ -69,6 +69,15 @@ class TrainingArguments(HFTrainingArguments):
             "gradient_accumulation_steps) and gradient_accumulation_steps is 1."
         },
     )
+    pack_tokens: int = field(
+        default=0,
+        metadata={
+            "help": "Tokens per packed forward pass. 0: the tokens of one micro-batch of the padded "
+            "recipe (micro batch size x mean example length of the data), for the selection "
+            "forwards; the trained fraction of it for the training forwards. A forward always "
+            "holds at least one example."
+        },
+    )
     data_selection_method: Literal["submodlib", "weightedsubmodlib", "none"] = field(
         default="submodlib",
         metadata={"help": "How to select the small batch from the large batch."},

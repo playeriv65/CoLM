@@ -52,7 +52,9 @@ def clean_gsm8k_solution(answer: str) -> str:
     return _FINAL_ANSWER.sub(lambda m: f"\nThe answer is {m.group(1).strip()}", answer).strip()
 
 
-def load_gsm8k_test(path: str, tokenizer, limit: int | None = None) -> SupervisedDataset:
+def load_gsm8k_test(
+    path: str, tokenizer, limit: int | None = None, max_length: int | None = None
+) -> SupervisedDataset:
     rows = []
     with open(path) as f:
         for line in f:
@@ -66,7 +68,9 @@ def load_gsm8k_test(path: str, tokenizer, limit: int | None = None) -> Supervise
             )
     if limit:
         rows = rows[:limit]
-    return SupervisedDataset(list_data_dict=rows, tokenizer=tokenizer, template_variation=False)
+    return SupervisedDataset(
+        list_data_dict=rows, tokenizer=tokenizer, template_variation=False, max_length=max_length
+    )
 
 
 def build_eval_sets(
@@ -74,8 +78,12 @@ def build_eval_sets(
     tokenizer,
     heldout: SupervisedDataset | None,
     limit: int | None = None,
+    max_length: int | None = None,
 ) -> dict[str, SupervisedDataset]:
-    """The sets named in `eval_args.eval_loss_sets`; `limit` truncates each (smoke runs)."""
+    """The sets named in `eval_args.eval_loss_sets`; `limit` truncates each (smoke runs).
+
+    Examples above `max_length` tokens are dropped, as in training (the held-out set already is).
+    """
     sets = {}
     for name in eval_args.eval_loss_sets:
         if name == HELDOUT_SET:
@@ -85,7 +93,9 @@ def build_eval_sets(
                 select_examples(heldout, range(min(limit, len(heldout)))) if limit else heldout
             )
         elif name == GSM8K_SET:
-            sets[name] = load_gsm8k_test(eval_args.eval_loss_gsm8k_file, tokenizer, limit)
+            sets[name] = load_gsm8k_test(
+                eval_args.eval_loss_gsm8k_file, tokenizer, limit, max_length
+            )
         else:
             raise ValueError(f"Unknown eval loss set {name!r}")
     return sets
@@ -229,11 +239,13 @@ class EvalLossCallback(TrainerCallback):
         trainer.log(logs)
 
 
-def add_eval_loss_callback(trainer, eval_args: HeldoutEvalArguments, heldout, output_dir):
+def add_eval_loss_callback(
+    trainer, eval_args: HeldoutEvalArguments, heldout, output_dir, max_length: int | None = None
+):
     """Register `EvalLossCallback` on `trainer` if `eval_loss_steps` is set."""
     if not eval_args.eval_loss_steps:
         return None
-    sets = build_eval_sets(eval_args, trainer.processing_class, heldout)
+    sets = build_eval_sets(eval_args, trainer.processing_class, heldout, max_length=max_length)
     callback = EvalLossCallback(
         trainer,
         sets,
@@ -275,6 +287,7 @@ def main(argv=None):
     import transformers
     from peft import PeftModel
 
+    from colm.train.config import sequence_limit
     from colm.train.data_arguments import DataArguments
     from colm.train.model_arguments import ModelArguments, add_padding_to_tokenizer
 
@@ -284,9 +297,10 @@ def main(argv=None):
         config = json.load(f)
     model_args, data_args, eval_args = hf_parser.parse_dict(config, allow_extra_keys=True)
 
+    limit = sequence_limit(model_args, data_args, bool(config.get("legacy", False)))
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         model_args.tokenizer_name or model_args.model_name_or_path,
-        model_max_length=model_args.model_max_length,
+        model_max_length=limit,
         cache_dir=model_args.cache_dir,
         revision=model_args.model_revision,
     )
@@ -296,14 +310,14 @@ def main(argv=None):
         full = get_training_dataset(
             data_args.train_files,
             tokenizer=tokenizer,
-            max_seq_length=data_args.max_seq_length,
+            max_seq_length=None if config.get("legacy") else limit,
             sample_percentage=data_args.percentage,
             subset_index_files=data_args.subset_index_files,
             seed=data_args.sample_data_seed,
             hf_datasets_cache_dir=data_args.hf_datasets_cache_dir,
         )
         _, heldout = split_holdout(full, eval_args.holdout_size, eval_args.holdout_seed)
-    sets = build_eval_sets(eval_args, tokenizer, heldout, limit=args.limit)
+    sets = build_eval_sets(eval_args, tokenizer, heldout, limit=args.limit, max_length=limit)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = transformers.AutoModelForCausalLM.from_pretrained(

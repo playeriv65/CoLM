@@ -20,9 +20,6 @@ class ModelArguments:
     tokenizer_name: str | None = field(
         default=None, metadata={"help": "Tokenizer name or path if not the same as model_name."}
     )
-    model_max_length: int = field(
-        default=512, metadata={"help": "Maximum sequence length; longer sequences are truncated."}
-    )
     cache_dir: str | None = field(
         default=None, metadata={"help": "HF cache override (default: $HF_HOME)."}
     )
@@ -30,8 +27,12 @@ class ModelArguments:
     trust_remote_code: bool = field(
         default=False, metadata={"help": "Allow custom modeling code from the hub."}
     )
-    attn_implementation: str = field(
-        default="sdpa", metadata={"help": "Attention kernel: sdpa, eager, flash_attention_2."}
+    attn_implementation: str | None = field(
+        default=None,
+        metadata={
+            "help": "Attention kernel. Default: `colm_varlen` (packed inputs, colm/train/attention.py); "
+            "`sdpa` with `legacy` (padded batches)."
+        },
     )
     torch_dtype: Literal["auto", "bfloat16", "float16", "float32", "none"] = field(
         default="none",

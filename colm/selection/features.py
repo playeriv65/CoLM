@@ -1,33 +1,38 @@
-"""Per-example features used for selection, one extractor per `data_selection_unit`.
+"""Per-example features of the selection, one extractor per `data_selection_unit`, on packed batches.
 
-`extract(batch)` takes a micro-batch (`input_ids`, `attention_mask`, `labels`, `colm_meta`) and
-returns one feature per example: `[n, d]` for vector units, `[n]` for scalar units.
-`mode` is the train / eval mode the extractor needs; None leaves the model as it is.
+`extract(pack)` takes a padding-free batch (`colm.selection.packing.pack`) and returns one feature
+per example: `[n, d]` for vector units, `[n]` for scalar units. `batched` extractors accept
+several examples per pack, the others get one. `mode` is the train / eval mode they need.
+The loss of an example is the mean over its own label tokens (the loss training minimises), so a
+feature never depends on the other examples of its pack.
 """
 
 import math
 
 import torch
+import torch.nn.functional as F
 
-from colm.selection.zo import LastLayerSplit, Perturbation, call, per_sample_loss
+from colm.selection.packing import label_positions, model_inputs
+from colm.selection.zo import LastLayerSplit, Perturbation, call
 
-MODEL_KEYS = ("input_ids", "attention_mask", "labels")
 
-
-def model_inputs(batch: dict) -> dict:
-    return {k: batch[k] for k in MODEL_KEYS if k in batch}
+def example_means(logits: torch.Tensor, targets: torch.Tensor, segment: torch.Tensor, n: int):
+    """Mean cross-entropy over the label tokens of each of the `n` examples of a pack."""
+    logits = logits.to(torch.promote_types(logits.dtype, torch.float32))
+    token = F.cross_entropy(logits, targets, reduction="none")
+    sums = token.new_zeros(n).index_add_(0, segment, token)
+    return sums / torch.bincount(segment, minlength=n).clamp(min=1)
 
 
 class Extractor:
-    batched = False  # accepts micro-batches of more than one example
+    batched = False
     scalar = False
-    mode: str | None = "eval"
+    mode = "eval"
 
     def __init__(self, args, model, zo_params, seed):
         self.args, self.model, self.zo_params, self.seed = args, model, zo_params, seed
-        self.legacy = args.legacy
 
-    def extract(self, batch: dict) -> torch.Tensor:
+    def extract(self, pack: dict) -> torch.Tensor:
         raise NotImplementedError
 
     def weight_prior(self) -> torch.Tensor:
@@ -36,69 +41,57 @@ class Extractor:
     def _weight_grad(self) -> bool:
         return self.args.mezo_selection == "weight_grad"
 
+    def _losses(self, pack, overrides=None) -> torch.Tensor:
+        """Mean label-token loss of every example of the pack (full model, logits at labels only)."""
+        positions, targets, segment = label_positions(pack)
+        out = call(self.model, overrides, **model_inputs(pack), logits_to_keep=positions)
+        return example_means(out.logits[0], targets, segment, len(pack["cu_seq_lens_q"]) - 1)
+
 
 class Rep(Extractor):
-    """Last-layer hidden state of the last real token."""
+    """Last-layer hidden state of the last token of each example."""
 
-    @property
-    def mode(self):
-        # Upstream error E13: features were extracted in whatever mode the model was in.
-        return None if self.legacy else "eval"
-
-    def extract(self, batch):
-        inputs = model_inputs(batch)
+    def extract(self, pack):
         with torch.inference_mode():
-            if self.legacy:
-                inputs["labels"] = inputs["input_ids"]  # an unused loss over every position
-            else:
-                inputs.pop("labels", None)
-            hidden = self.model(**inputs, output_hidden_states=True).hidden_states[-1]
-        rows = torch.arange(len(hidden), device=hidden.device)
-        last = inputs["attention_mask"].sum(dim=1) - 1
-        return hidden[rows, last].flatten(1)
+            hidden = self.model(**model_inputs(pack), output_hidden_states=True).hidden_states[-1][
+                0
+            ]
+        return hidden[pack["cu_seq_lens_q"][1:].long() - 1]
 
 
 class CompletionLength(Extractor):
     scalar = True
     mode = None
 
-    def extract(self, batch):
-        return batch["colm_meta"]["completion_lengths"]
+    def extract(self, pack):
+        return pack["colm_meta"]["completion_lengths"]
 
 
 class LengthLoss(Extractor):
-    """Token count times loss / 10 of a single example."""
+    """Token count times loss / 10 of one example."""
 
     scalar = True
 
-    @property
-    def mode(self):
-        return None if self.legacy else "eval"  # upstream error E13, as in Rep
-
-    def extract(self, batch):
-        length = max(batch["attention_mask"].sum(dim=1).max().item(), 1)
+    def extract(self, pack):
         with torch.no_grad():
-            loss = self.model(**model_inputs(batch)).loss.view(-1)
-        assert len(loss) == 1, "length_loss_weighted needs one example per micro-batch"
-        loss = torch.where(torch.isnan(loss), torch.zeros_like(loss), loss).item()
-        value = length * loss / 10
+            loss = self._losses(pack).item()
+        value = pack["max_length_q"] * loss / 10
         value = 0.0 if math.isnan(value) or math.isinf(value) else max(value, 1e-8)
-        return torch.tensor([value], dtype=torch.float64)
+        return torch.tensor([value], dtype=torch.float32)
 
 
 class MaskedGrad(Extractor):
-    """Exact gradient of the training loss of one example w.r.t. the ZO parameters."""
+    """Exact gradient of the loss of one example w.r.t. the ZO parameters."""
 
     mode = "train"
 
-    def extract(self, batch):
-        loss = self.model(**model_inputs(batch)).loss / int(
-            self.args.per_device_train_batch_size * self.args.small_batch_ratio
-        )
+    def extract(self, pack):
+        # The real gradient is the mean over the selected examples of all ranks.
+        selected = int(self.args.per_device_train_batch_size * self.args.small_batch_ratio)
+        loss = self._losses(pack)[0] / (selected * self.args.world_size)
         params = [p for _, p in self.zo_params]
-        grads = torch.autograd.grad(loss, params)
         parts = []
-        for grad, p in zip(grads, params):
+        for grad, p in zip(torch.autograd.grad(loss, params), params, strict=True):
             update = grad.detach()
             if self._weight_grad() and not torch.all(p.data == 0):
                 update = update * p.data
@@ -107,21 +100,19 @@ class MaskedGrad(Extractor):
 
 
 class Mezo(Extractor):
-    """Two forwards of the whole model at theta +- eps z (one example per micro-batch)."""
+    """Two forwards of the whole model at theta +- eps z (one example per pack)."""
 
     def __init__(self, args, model, zo_params, seed):
         super().__init__(args, model, zo_params, seed)
-        self.perturbation = Perturbation(zo_params, args.mezo_eps, seed, args.legacy)
+        self.perturbation = Perturbation(zo_params, args.mezo_eps, seed)
 
-    def extract(self, batch):
-        inputs = model_inputs(batch)
-
+    def extract(self, pack):
         def loss(overrides):
             with torch.inference_mode():
-                return call(self.model, overrides, **inputs).loss.detach()
+                return self._losses(pack, overrides)
 
         g = self.perturbation.projected_grad(loss)
-        return self.perturbation.features(g, self._weight_grad()).reshape(1, -1)
+        return self.perturbation.features(g, self._weight_grad())
 
 
 class MezoEfficient(Extractor):
@@ -133,22 +124,23 @@ class MezoEfficient(Extractor):
         super().__init__(args, model, zo_params, seed)
         base = model.get_base_model() if hasattr(model, "get_base_model") else model
         self.split = LastLayerSplit(base)
-        self.perturbation = Perturbation(zo_params, args.mezo_eps, seed, args.legacy)
+        self.perturbation = Perturbation(zo_params, args.mezo_eps, seed)
         self.names = {n: self.split.relative_name(n) for n in self.perturbation.names}
 
-    def extract(self, batch):
-        pert, split = self.perturbation, self.split
+    def extract(self, pack):
+        split = self.split
+        positions, targets, segment = label_positions(pack)
         with torch.inference_mode():
-            state = split.prefix(batch["input_ids"], batch["attention_mask"])
+            state = split.prefix(**model_inputs(pack))
 
         def loss(overrides):
-            if overrides is not None:
-                overrides = {self.names[n]: v for n, v in overrides.items()}
+            overrides = {self.names[n]: v for n, v in overrides.items()}
             with torch.inference_mode():
-                return per_sample_loss(split.logits(state, overrides), batch["labels"], self.legacy)
+                logits = split.head(split.hidden(state, overrides)[0, positions])
+                return example_means(logits, targets, segment, len(pack["cu_seq_lens_q"]) - 1)
 
-        g = pert.projected_grad(loss)
-        return pert.features(g, self._weight_grad())
+        g = self.perturbation.projected_grad(loss)
+        return self.perturbation.features(g, self._weight_grad())
 
 
 EXTRACTORS = {

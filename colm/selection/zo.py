@@ -145,7 +145,7 @@ class LastLayerSplit:
         """Parameter name relative to the last layer (`...layers.31.self_attn.x` -> `self_attn.x`)."""
         return name.split(self.last_name, 1)[1]
 
-    def prefix(self, input_ids, attention_mask) -> Prefix:
+    def prefix(self, **inputs) -> Prefix:
         captured = {}
 
         def hook(module, args, kwargs):
@@ -155,14 +155,14 @@ class LastLayerSplit:
         handle = self.last.register_forward_pre_hook(hook, with_kwargs=True)
         try:
             try:
-                self.decoder(input_ids=input_ids, attention_mask=attention_mask, use_cache=False)
+                self.decoder(**{"use_cache": False, **inputs})
             except _PrefixDone:
                 pass
         finally:
             handle.remove()
         state = captured["value"]
         if not self._verified:
-            self._verify(input_ids, attention_mask, state)
+            self._verify(inputs, state)
         return state
 
     def hidden(self, state: Prefix, overrides: dict[str, torch.Tensor] | None = None):
@@ -174,31 +174,9 @@ class LastLayerSplit:
         logits = self.head(self.hidden(state, overrides))
         return logits.to(torch.promote_types(logits.dtype, torch.float32))
 
-    def _verify(self, input_ids, attention_mask, state) -> None:
-        reference = self.decoder(
-            input_ids=input_ids, attention_mask=attention_mask, use_cache=False
-        ).last_hidden_state
+    def _verify(self, inputs, state) -> None:
+        reference = self.decoder(**{"use_cache": False, **inputs}).last_hidden_state
         replay = self.hidden(state)
         if not torch.allclose(replay, reference, rtol=1e-4, atol=1e-5):
             raise RuntimeError("the last-layer split does not reproduce the model's forward")
         self._verified = True
-
-
-def per_sample_loss(
-    logits: torch.Tensor, labels: torch.Tensor, legacy: bool = False
-) -> torch.Tensor:
-    """Loss of every example of a batch, `[batch]`.
-
-    Mean over the label tokens of the example, the loss training minimises. `legacy` (upstream
-    error E2): divide by the padded width of the batch minus one instead, so an example's loss
-    depends on the other examples of its micro-batch.
-    """
-    shift_logits = logits[..., :-1, :].contiguous()
-    shift_labels = labels[..., 1:].contiguous().to(shift_logits.device)
-    batch, width = shift_labels.shape
-    token_loss = nn.functional.cross_entropy(
-        shift_logits.view(-1, shift_logits.shape[-1]), shift_labels.view(-1), reduction="none"
-    ).view(batch, width)
-    if legacy:
-        return token_loss.mean(dim=1)
-    return token_loss.sum(dim=1) / (shift_labels != -100).sum(dim=1).clamp(min=1)

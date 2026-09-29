@@ -45,7 +45,7 @@ def mixture(path):
         f.write("\n".join(json.dumps(r) for r in rows) + "\n")
 
 
-def make_phi(tok, seed=0, resid_pdrop=0.0):
+def make_phi(tok, seed=0, resid_pdrop=0.0, attn="sdpa"):
     torch.manual_seed(seed)
     config = PhiConfig(
         vocab_size=len(tok),
@@ -58,7 +58,7 @@ def make_phi(tok, seed=0, resid_pdrop=0.0):
         pad_token_id=tok.pad_token_id,
         resid_pdrop=resid_pdrop,
     )
-    config._attn_implementation = "sdpa"
+    config._attn_implementation = attn
     return PhiForCausalLM(config)
 
 
@@ -75,9 +75,9 @@ def add_lora(model, r=4, lora_dropout=0.0):
     return model
 
 
-def model_fp64(tok, lora_dropout=0.0, resid_pdrop=0.0):
+def model_fp64(tok, lora_dropout=0.0, resid_pdrop=0.0, attn="sdpa"):
     """Tiny Phi with LoRA (B randomised, LoRA B starts at zero otherwise), in float64."""
-    model = add_lora(make_phi(tok, 0, resid_pdrop), lora_dropout=lora_dropout)
+    model = add_lora(make_phi(tok, 0, resid_pdrop, attn), lora_dropout=lora_dropout)
     torch.manual_seed(1)
     with torch.no_grad():
         for n, p in model.named_parameters():

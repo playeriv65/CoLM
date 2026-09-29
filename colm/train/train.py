@@ -24,7 +24,8 @@ from colm.data.get_training_dataset import SupervisedDataset, get_training_datas
 from colm.data.holdout import save_holdout_indices, split_holdout
 from colm.data.superglue import build_superglue
 from colm.eval.eval_loss import add_eval_loss_callback
-from colm.train.config import parse_args
+from colm.train import attention
+from colm.train.config import parse_args, sequence_limit
 from colm.train.data_arguments import get_data_statistics
 from colm.train.model_arguments import add_padding_to_tokenizer
 from colm.train.trainers import CustomTrainer, SubsetTrainer, SubsetTrainerEfficient
@@ -89,7 +90,8 @@ def build_model(model_args, training_args, tokenizer):
         trust_remote_code=model_args.trust_remote_code,
         cache_dir=model_args.cache_dir,
         revision=model_args.model_revision,
-        attn_implementation=model_args.attn_implementation,
+        attn_implementation=model_args.attn_implementation
+        or ("sdpa" if training_args.legacy else attention.register()),
     )
     if not model_args.enable_dropout:
         logger.info("Set dropout to 0")
@@ -141,14 +143,14 @@ def build_model(model_args, training_args, tokenizer):
     return model
 
 
-def build_data(model_args, data_args, training_args, eval_args, tokenizer):
+def build_data(model_args, data_args, training_args, eval_args, tokenizer, limit):
     """(train dataset, collator, analysis dataset, held-out examples)."""
     if "superglue" in data_args.train_files[0]:
         return (*build_superglue(model_args, data_args, training_args, tokenizer), None)
     dataset = get_training_dataset(
         data_args.train_files,
         tokenizer=tokenizer,
-        max_seq_length=data_args.max_seq_length,
+        max_seq_length=None if training_args.legacy else limit,
         sample_percentage=data_args.percentage,
         subset_index_files=data_args.subset_index_files,
         seed=data_args.sample_data_seed,
@@ -202,16 +204,17 @@ def main(argv=None):
     logger.info(f"{training_args}\n{model_args}\n{data_args}")
 
     set_seed(training_args.seed)
+    limit = sequence_limit(model_args, data_args, training_args.legacy)
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.tokenizer_name or model_args.model_name_or_path,
-        model_max_length=model_args.model_max_length,
+        model_max_length=limit,
         cache_dir=model_args.cache_dir,
         revision=model_args.model_revision,
     )
     add_padding_to_tokenizer(tokenizer)
     model = build_model(model_args, training_args, tokenizer)
     train_dataset, collator, analysis_dataset, heldout = build_data(
-        model_args, data_args, training_args, eval_args, tokenizer
+        model_args, data_args, training_args, eval_args, tokenizer, limit
     )
 
     if not training_args.coreset:
@@ -230,7 +233,7 @@ def main(argv=None):
         processing_class=tokenizer,
         data_collator=collator,
     )
-    add_eval_loss_callback(trainer, eval_args, heldout, training_args.output_dir)
+    add_eval_loss_callback(trainer, eval_args, heldout, training_args.output_dir, limit)
 
     result = trainer.train(resume_from_checkpoint=model_args.checkpoint_path)
     trainer.save_model()
