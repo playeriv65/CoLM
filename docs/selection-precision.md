@@ -3,14 +3,16 @@
 2026-09-29, code at `e0d8c28`. Question: how accurate must the MeZO selection forward be, does the
 current default (P: fp16 decoder prefix, fp32 perturbed last layer, `docs/fp16-prefix.md`) hurt the
 selection or the learning compared with full fp32 (F), and how does the upstream all-fp16 autocast
-regime (H) behave. Measurement only: no default and no selection or training logic was changed.
+regime (H) behave. The study itself changed no default; its recommendation was then decided by the
+user (see "Decision", 2026-09-29: the fp32 tail of 2 blocks is now the Phi-2 default).
 
 Scripts: `scripts/precision_arms.py` (arms), `scripts/measure_selection_precision.py` (g_i),
-`scripts/analyze_selection_precision.py` (tables, selection), `scripts/train_precision_arm.py` and
+`scripts/analyze_selection_precision.py` (tables, selection), `scripts/train_precision_arm.py` (arms F, P, P2, H, random) and
 `scripts/summarize_precision_runs.py` (paired learning runs), `scripts/measure_hybrid_prefix.py`
 (fp32-tail hybrid prefix), `scripts/measure_layer_sensitivity.py` and `scripts/measure_attention_ops.py`
 (why the last blocks); CPU tests in
-`tests/test_precision_arms.py`. Raw data (npz, logs, run directories) are outside git under
+`tests/test_precision_arms.py`; the library option is `selection_prefix_fp32_tail`
+(`tests/test_fp32_tail.py`). Raw data (npz, logs, run directories) are outside git under
 `$COLM_ARTIFACT_ROOT/artifacts/CoLM/precision-20260929/`.
 
 ## Arms
@@ -19,7 +21,7 @@ Scripts: `scripts/precision_arms.py` (arms), `scripts/measure_selection_precisio
 |---|---|---|
 | R | fp32 (the F prefix state, promoted to float64) | float64, exact directional derivative d/dt L_i(B + t z) by forward-mode autodiff |
 | F | fp32 | fp32 (`selection_prefix_dtype=float32`) |
-| P | fp16 autocast, promoted to fp32 | fp32 (`selection_prefix_dtype=float16`, the Phi-2 default) |
+| P | fp16 autocast, promoted to fp32 | fp32 (`selection_prefix_dtype=float16`, `selection_prefix_fp32_tail=0`; the Phi-2 default until 2026-09-29) |
 | H | fp16 autocast | fp16 autocast (the upstream regime; no library switch, patched in by the script) |
 
 Suffix `r`: the pool packed in reverse order (a different pack composition: the packing-noise floor
@@ -298,20 +300,32 @@ the fp32 floor measured in Phase 1 (F vs F with reversed packing: 0.23 % median)
 consistent but rests on one adapter state and 256 examples; the fp32-attention-only variant (q, k,
 softmax of blocks 29 and 30 in fp32, everything else fp16) that this suggests was not run.
 
-## Decision (recommendation; the defaults were not changed)
+## Decision (2026-09-29: k = 2 chosen and made the default)
 
-1. Keep P as the default. Its g_i has median error 19 % and 6 % sign flips, and its facility-location
-   picks agree with the exact selection in 0.62 of the picks against 0.83 for F (noise floor 0.80),
-   so the selection does change; but 300-step learning (held-out and GSM8K loss) of P and F differ
-   by at most 0.0005 / 0.0046, inside the F seed-to-seed spread, and F is itself not
-   distinguishable from a random ranking with the selector's structure at that horizon. P saves
-   0.53 s of a 1.45 s step.
-2. Reverting to F buys selection fidelity and no measured learning gain at 300 steps; cost +57 %
-   step time. If selection fidelity is wanted for its own sake, the hybrid P2 (fp32 last two prefix
-   layers) restores the fp32-floor agreement for +3.6 % step time (untested in learning).
-   The error is localised in the q/k/softmax path of the attention of blocks 29 and 30
-   (`Why the last two blocks`), so an fp32 attention-only tail there would be cheaper still
-   (not run).
+The user chose the hybrid prefix with an fp32 tail of **k = 2** blocks as the Phi-2 default
+(`selection_prefix_fp32_tail=2`, next to `selection_prefix_dtype=float16`; `docs/fp16-prefix.md`).
+Basis, from the tables above (512 examples x 5 directions against the exact reference R):
+
+| k (fp32 prefix blocks) | median rel. err. of g_i | sign flips / 2560 | est. step ms |
+|---|---|---|---|
+| 0 (P, the former default) | 18.5 % | 152 | 924 |
+| 1 | 11.3 % | 110 | 941 |
+| **2 (new default)** | **1.15 %** | **19** | **957** |
+| 4 | 1.09 % | 15 | 991 |
+| 8 | 0.31 % | 2 | 1059 |
+| 31 (F) | 0.16 % | 2 | 1442 |
+
+The selection overlap of k = 2 with the exact selection is inside the fp32 noise floor, for +3.6 %
+step time. The remaining cases and the findings that stay as recommended:
+
+1. P (k = 0) has median error 19 % and 6 % sign flips, and its facility-location picks agree with
+   the exact selection in 0.62 of the picks against 0.83 for F (noise floor 0.80); 300-step
+   learning (held-out and GSM8K loss) of P and F differ by at most 0.0005 / 0.0046, inside the F
+   seed-to-seed spread, and F is itself not distinguishable from a random ranking with the
+   selector's structure at that horizon. Learning for k = 2 was not measured.
+2. The error is localised in the q/k/softmax path of the attention of blocks 29 and 30
+   (`Why the last two blocks`), so an fp32 attention-only tail there would be cheaper still (not
+   implemented; not part of the default).
 3. H (upstream fp16 autocast everywhere) is weakly informative (FL picks 0.44-0.49 against 0.36
    random, 21 % sign flips, run-to-run Pearson 0.71) but learns as well as F at 300 steps here; it
    is not a safe basis for selection studies. A larger eps helps H (error 72 % -> 38 %) but not P.
@@ -319,7 +333,7 @@ softmax of blocks 29 and 30 in fp32, everything else fp16) that this suggests wa
    is the prefix state entering the perturbed layer, not eps.
 
 Unmeasured: learning at 1024 steps or with several seeds (a small ranking effect is not
-excluded); learning for Pk and for eps 1e-2; the initial lora_B = 0 state (only the 100-step
+excluded); learning for Pk (including the default k = 2) and for eps 1e-2; the initial lora_B = 0 state (only the 100-step
 adapter was measured); H's step time on a clean GPU; other models (Llama/Qwen keep fp32 prefixes);
 an aggregate write-up of the upstream non-efficient path (only the per-arm tables of the earlier
 study exist).
@@ -344,3 +358,7 @@ python scripts/analyze_selection_precision.py "$OUT/hybrid/g.npz" --arms F,P0,P1
   --pairs P1:P0,P2:P0,P4:P0,P8:P0,P16:P0,P31:P0,P31:F --out "$OUT/hybrid/analysis.json"
 python scripts/measure_hybrid_prefix.py --table "$OUT/hybrid/analysis.json" "$OUT/hybrid/timing.json"
 ```
+
+The library option (`selection_prefix_fp32_tail`, the shipped default k = 2) is checked through
+`MezoEfficient` with `measure_selection_precision.py --library-tail 2` (adds arm `L`); result in
+`docs/fp16-prefix.md`, section "Library check of the default".

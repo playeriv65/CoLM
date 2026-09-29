@@ -49,7 +49,7 @@ are no other launch scripts: do not add shell wrappers, extend the entry points.
   flash cumulative lengths (`packing.model_inputs`); the training forward runs
   `attn_implementation` (`flash_attention_2`, recipe default in `configs/model_profiles.json`; the
   hub kernel through `kernels` when `flash-attn` is not installed) and the no-grad selection
-  forward `selection_attn_implementation` (`sdpa`, dense block mask; fp16 prefix and fp32
+  forward `selection_attn_implementation` (`sdpa`, dense block mask; fp16 prefix with an fp32 tail of two blocks and fp32
   suffix for the Phi-2 recipe); the trainer switches with
   `model.set_attn_implementation` (`_Trainer.set_attention`). `colm/train/memory.py` — peak memory
   of every rank per phase (`MemoryMeter`).
@@ -89,14 +89,20 @@ are no other launch scripts: do not add shell wrappers, extend the entry points.
   dropped and counted per source (`PromptTooLong` in SuperGLUE evaluation). Memory is controlled
   by how many whole examples go into a packed forward (`train_max_tokens`, `pack_tokens`).
   `max_length_q/k` (flash varlen kwargs) and vLLM/HF `max_new_tokens` are not truncation.
-- The Phi-2 model profile sets `selection_prefix_dtype=float16`: the unperturbed
-  prefix uses fp16 autocast and requires fp32 model weights, while the perturbed
-  last layer and loss remain fp32. Other profiles retain their explicit precision
-  until tested. CLI/JSON overrides take precedence; the resolved configuration
-  records the choice. The Phi-2 path changes selected sets beyond
-  the fp32 packing noise (`docs/fp16-prefix.md`); learning quality has not yet
-  been compared. Packed inputs need `use_cache=False` (a cache ends the
-  packed-batch detection of transformers).
+- The Phi-2 model profile sets `selection_prefix_dtype=float16` and
+  `selection_prefix_fp32_tail=2`: the unperturbed prefix (layers 0-30) uses fp16
+  autocast except its last two blocks, which run in fp32 (a forward pre-hook in
+  `LastLayerSplit._fp32_tail`, removed when the prefix returns); it requires fp32
+  model weights, while the perturbed last layer and loss remain fp32. The tail
+  is 0 for other profiles and whenever the prefix is explicitly `float32`
+  (a tail with a non-fp16 prefix is an error); tail = all prefix layers equals
+  the fp32 prefix, tail 0 the plain fp16 prefix. CLI/JSON overrides take
+  precedence; the resolved configuration records the choice. The plain fp16
+  prefix changed selected sets beyond the fp32 packing noise; the 2-block tail
+  brings g_i to a median 1.2 % error (`docs/selection-precision.md`,
+  `docs/fp16-prefix.md`); learning quality has not yet been compared. Packed
+  inputs need `use_cache=False` (a cache ends the packed-batch detection of
+  transformers).
 - The Phi-2 profile sets `pack_tokens=1536` for selection. This is distinct
   from `train_max_tokens=1536`; JSON or CLI values override either budget.
   `--pack_tokens 0` restores the data-derived selection budget. The one-run

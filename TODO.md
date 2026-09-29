@@ -16,12 +16,17 @@ commit / result pointer, delete them once they are recorded in docs. Optimisatio
       result. The pinned local build passed offline preflight on GPU 2; the worker now stops on
       the first failed job. Run the fixed code with E4 (tokenisation and no truncation), E8 (question-grouped
       held-out set), and E9 (eval scoring) corrected (`docs/errors.md`). Use a fresh queue
-      `queues/rank-sweep-v4` and outputs in `out/rank-sweep-v4`, pinned to the
-      FP16 selection prefix, FP32 suffix, and 1536-token budgets. Earlier queues
-      and outputs must not be reused (deletion pending confirmation). GPU 2 is assigned by the user.
+      `queues/rank-sweep-v5` and outputs in `out/rank-sweep-v5`, pinned to the
+      FP16 selection prefix with an FP32 tail of 2 blocks (`selection_prefix_fp32_tail=2`),
+      FP32 suffix, and 1536-token budgets. The v4 queue and `out/rank-sweep-v4` were
+      pinned to the plain FP16 prefix (k = 0) and are a different arm: do not mix or reuse them
+      (v4 results are summarised with the spec of commit 5a6f778); earlier queues
+      and outputs must not be reused either (deletion pending confirmation). The v5 queue is
+      not yet created or started. GPU 2 is assigned by the user.
 - [ ] Training attention gradient precision remains a separate decision
       (`docs/errors.md`). The Phi-2 selection prefix uses fp16 while the
-      perturbed final layer and loss remain fp32 (`docs/fp16-prefix.md`).
+      perturbed final layer and loss remain fp32, and the last two prefix blocks
+      stay fp32 (`docs/fp16-prefix.md`).
 - [ ] Make evaluation report loss as well as accuracy in `math_eval` (accuracy only today).
 - [ ] Optimisation: profile the new fp16-prefix step for launch overhead and
       the training forward/backward before choosing another kernel change.
@@ -49,10 +54,10 @@ commit / result pointer, delete them once they are recorded in docs. Optimisatio
       accuracy on gsm8k / math / numglue / svamp / deepmind / simuleq for checkpoint-512 and 1024
       (vLLM, PoT + CoT backup, 0-shot); step time, training peak memory, trainable params.
       Launch (queue is generated once, the worker takes the GPU explicitly):
-      `colm-sweep create --sweep configs/rank_sweep/sweep.json --queue queues/rank-sweep-v4`
-      then `colm-sweep work --queue queues/rank-sweep-v4 --gpu 2` in tmux window
+      `colm-sweep create --sweep configs/rank_sweep/sweep.json --queue queues/rank-sweep-v5`
+      then `colm-sweep work --queue queues/rank-sweep-v5 --gpu 2` in tmux window
       `CoLM-rank-sweep`. Job order: base eval loss, then per arm train -> eval loss -> eval accuracy,
-      then a CPU summary (`out/rank-sweep-v4/summary.{json,md}`). Results/logs: `out/rank-sweep-v4/<run>/`,
+      then a CPU summary (`out/rank-sweep-v5/summary.{json,md}`). Results/logs: `out/rank-sweep-v5/<run>/`,
       `logs/rank-sweep-<job>-r<r>-a<alpha>-<steps>steps-seed<seed>-<timestamp>.log`.
       Estimate (latest r=128 one-run timing: 885 ms/step, 1024 steps = ~15 min; the old
       code had 2868 ms/step = ~49 min): ~15 min training + 4 in-training evaluations x 26 s (measured:
@@ -68,10 +73,10 @@ commit / result pointer, delete them once they are recorded in docs. Optimisatio
 
 ## Decisions pending (user)
 
-- Selection precision (F / P / H measured, recommendation in `docs/selection-precision.md`);
-  precision of the recipe (fp16 attention gradients, `docs/errors.md`); D2-D4 of
-  `docs/optimization-backlog.md` (selection precision, dropout for activation reuse, 1-D facility
-  location). D1 (padded divisor) is decided: mean over the example's label tokens.
+- Precision of the recipe (fp16 attention gradients, `docs/errors.md`); D3-D4 of
+  `docs/optimization-backlog.md` (dropout for activation reuse, 1-D facility
+  location). D1 (padded divisor) is decided: mean over the example's label tokens. D2 (selection
+  precision) is decided: fp16 prefix with an fp32 tail of 2 blocks (`docs/selection-precision.md`).
 
 ## Cleanup pending confirmation
 

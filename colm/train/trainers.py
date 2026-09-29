@@ -253,6 +253,7 @@ class CoresetTrainer(_Trainer):
             "attn_implementation": self.train_attn,
             "selection_attn_implementation": args.selection_attn_implementation,
             "selection_prefix_dtype": getattr(self.extractor, "prefix_dtype", "not_applicable"),
+            "selection_prefix_fp32_tail": getattr(self.extractor, "fp32_tail", "not_applicable"),
         }
 
     # ----- budgets and sub-batches (differ between the two coreset trainers) --------------

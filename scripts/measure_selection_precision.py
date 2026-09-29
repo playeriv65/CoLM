@@ -1,7 +1,7 @@
 """Per-example MeZO scalars g_i under different selection precisions, on saved pools.
 
 Arms (see `scripts/precision_arms.py`): R exact float64 reference; F fp32; P fp16 prefix + fp32
-suffix; H fp16 prefix and suffix; suffix `r` = the pool packed in reverse order (packing-noise
+suffix; H fp16 prefix and suffix; `L` = the library extractor (`MezoEfficient`) with `--library-tail K` fp32 tail blocks (only with that flag); suffix `r` = the pool packed in reverse order (packing-noise
 floor / run-to-run noise); `_e2` = epsilon 1e-2. `Rfd3` / `Rfd2` are float64 finite differences at
 eps 1e-3 / 1e-2 (the bias of the estimator itself). Output: one npz with g[arm] of shape
 [directions, examples], the directions z, the example bookkeeping and the environment.
@@ -55,6 +55,12 @@ def arguments():
     parser.add_argument("--directions", type=int, default=5)
     parser.add_argument("--seed", type=int, default=734221, help="seed of directions 1..")
     parser.add_argument("--pack-tokens", type=int, default=1536)
+    parser.add_argument(
+        "--library-tail",
+        type=int,
+        default=None,
+        help="add arm L: MezoEfficient with selection_prefix_fp32_tail=K (library path)",
+    )
     parser.add_argument("--validate", action="store_true")
     parser.add_argument("--validate-examples", type=int, default=8)
     parser.add_argument("--device", default="cuda:0")
@@ -114,6 +120,8 @@ def measure_pack(ctx, batch, reverse):
     run("H" + tag, lambda z, z64: fd_estimate(split, slow, batch, names, params, z, EPS, True))
     if reverse:
         return out
+    if ctx.get("library"):
+        out["L"] = torch.stack([e.extract(batch) for e in ctx["library"]]).cpu().double()
     run("F_e2", lambda z, z64: fd_estimate(split, s32, batch, names, params, z, EPS_LARGE))
     run("P_e2", lambda z, z64: fd_estimate(split, sp, batch, names, params, z, EPS_LARGE))
     run("H_e2", lambda z, z64: fd_estimate(split, slow, batch, names, params, z, EPS_LARGE, True))
@@ -130,10 +138,20 @@ def check_extractor(ctx, batch, seed, z):
     model, params = ctx["model"], ctx["zo_params"]
     reference = {}
     for arm, dtype in (("F", "float32"), ("P", "float16")):
-        args = SimpleNamespace(mezo_eps=EPS, selection_prefix_dtype=dtype, mezo_selection="grad")
+        args = SimpleNamespace(
+            mezo_eps=EPS,
+            selection_prefix_dtype=dtype,
+            selection_prefix_fp32_tail=0,
+            mezo_selection="grad",
+        )
         extractor = MezoEfficient(args, model, params, seed)
         reference[arm] = extractor.extract(batch).cpu().double()
-    args = SimpleNamespace(mezo_eps=EPS, selection_prefix_dtype="float16", mezo_selection="grad")
+    args = SimpleNamespace(
+        mezo_eps=EPS,
+        selection_prefix_dtype="float16",
+        selection_prefix_fp32_tail=0,
+        mezo_selection="grad",
+    )
     reference["H"] = (
         all_half_extract(MezoEfficient(args, model, params, seed), batch).cpu().double()
     )
@@ -159,7 +177,17 @@ def main():
     split = LastLayerSplit(model.get_base_model())
     zo_params = zo_parameters(model, ["v_proj"], -1)
     seeds, zs = directions(pools, zo_params, args.directions, args.seed)
+    library = []
+    if args.library_tail is not None:
+        library_args = SimpleNamespace(
+            mezo_eps=EPS,
+            selection_prefix_dtype="float16",
+            selection_prefix_fp32_tail=args.library_tail,
+            mezo_selection="grad",
+        )
+        library = [MezoEfficient(library_args, model, zo_params, seed) for seed in seeds]
     ctx = {
+        "library": library,
         "model": model,
         "split": split,
         "split64": double_split(split),
@@ -180,7 +208,8 @@ def main():
 
     pool_size = TrainingArguments(output_dir="unused").per_device_train_batch_size
     total = args.pools * pool_size
-    g = {arm: np.full((args.directions, total), np.nan) for arm in MAIN_ARMS}
+    arms = MAIN_ARMS + (["L"] if library else [])
+    g = {arm: np.full((args.directions, total), np.nan) for arm in arms}
     meta = {"source": [], "index": [], "length": [], "num_labels": []}
     extractor_check = None
     for p in range(args.pools):

@@ -45,6 +45,7 @@ def test_real_sweep_spec_is_the_agreed_design():
     assert training.max_steps == 1024 and training.micro_batch_size == 4
     assert training.pool_micro_batches == 8 and training.efficient_mezo is True
     assert training.selection_prefix_dtype == "float16"
+    assert training.selection_prefix_fp32_tail == 2
     assert training.pack_tokens == 1536 and training.train_max_tokens == 1536
     assert (
         training.seed == 0

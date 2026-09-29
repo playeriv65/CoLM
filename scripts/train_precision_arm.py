@@ -5,7 +5,8 @@ config, train overrides, environment and pinned flash kernel); only the steps, t
 steps, the seed and the selection arm differ:
 
     F       fp32 selection prefix + fp32 suffix (library, selection_prefix_dtype=float32)
-    P       fp16 prefix + fp32 suffix (library default of the Phi-2 profile)
+    P       fp16 prefix + fp32 suffix (library, selection_prefix_fp32_tail=0)
+    P2      fp16 prefix with an fp32 tail of 2 blocks (the Phi-2 profile default)
     H       fp16 autocast for prefix and suffix (script-local patch of MezoEfficient.extract)
     random  uniform random 16 of the pool of 32 per step (script-local patch of the selector,
             the MeZO forward is skipped); same pools, same training compute
@@ -25,12 +26,15 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 SWEEP = "configs/rank_sweep/sweep.json"
+# arm -> (selection_prefix_dtype, selection_prefix_fp32_tail); every arm pins both, whatever the
+# sweep and the model profile default to.
 ARMS = {
-    "F": "float32",
-    "P": "float16",
-    "H": "float16",
-    "random": "float16",
-    "random_kept": "float16",
+    "F": ("float32", 0),
+    "P": ("float16", 0),
+    "P2": ("float16", 2),
+    "H": ("float16", 0),
+    "random": ("float16", 0),
+    "random_kept": ("float16", 0),
 }
 
 
@@ -67,7 +71,8 @@ def main():
         "max_steps": args.steps,
         "eval_loss_steps": args.eval_steps,
         "seed": args.seed,
-        "selection_prefix_dtype": ARMS[args.arm],
+        "selection_prefix_dtype": ARMS[args.arm][0],
+        "selection_prefix_fp32_tail": ARMS[args.arm][1],
         "output_dir": str(out),
         "run_name": name,
     }

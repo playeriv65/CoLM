@@ -35,19 +35,23 @@ transformers (`flash_attention_2` for the fp16 training forward, loaded as the h
 `sdpa` for the selection forward). On CPU, on GPUs older than Ampere or without mixed
 precision pass `--attn_implementation sdpa`.
 
-With the Phi-2 recipe, selection now runs the unperturbed decoder prefix under
-FP16 autocast and keeps the perturbed last layer and loss in FP32. The
-Phi-2 model profile sets `selection_prefix_dtype=float16` and requires FP32
-model weights; pass `--selection_prefix_dtype float32` to retain the old prefix.
-It also sets `pack_tokens=1536` for selection; `--pack_tokens 0` restores the
-data-derived budget (about 1003 tokens on MathInstruct).
-This is faster but changes
-selected examples beyond the measured FP32 packing noise. Learning quality has
-not yet been compared; see [`docs/fp16-prefix.md`](docs/fp16-prefix.md).
-Other model profiles retain their existing prefix precision until tested; an
+With the Phi-2 recipe, selection runs the unperturbed decoder prefix under
+FP16 autocast except its last two blocks, which run in FP32, and keeps the
+perturbed last layer, head and loss in FP32. The Phi-2 model profile sets
+`selection_prefix_dtype=float16` and `selection_prefix_fp32_tail=2` and requires
+FP32 model weights; pass `--selection_prefix_dtype float32` for the full FP32
+prefix or `--selection_prefix_fp32_tail 0` for the plain FP16 prefix. The tail
+cuts the FP16 error of the per-example MeZO scalars from a median 18 % to about
+1 % (selection overlap with the exact selection within the FP32 noise floor) for
+about +3.6 % step time. It also sets `pack_tokens=1536` for selection;
+`--pack_tokens 0` restores the data-derived budget (about 1003 tokens on
+MathInstruct). Learning quality has not been compared; see
+[`docs/fp16-prefix.md`](docs/fp16-prefix.md) and
+[`docs/selection-precision.md`](docs/selection-precision.md).
+Other model profiles keep an FP32 prefix (tail 0) until tested; an
 explicit command-line or JSON value overrides the profile. The resolved run
 configuration records the selected mode, and an unsupported FP16-prefix/weight
-combination fails at startup.
+combination or a tail without the FP16 prefix fails at startup.
 
 W&B is off by default (`report_to="none"`, nothing imports `wandb`). To log a run, install the extra
 and pass `--report_to wandb` (optionally `--wandb_project/--wandb_entity/--wandb_notes`, or the
@@ -186,10 +190,10 @@ worker resolves its snapshot under the active `HF_HUB_CACHE` or `HF_HOME/hub` an
 `LOCAL_KERNELS` to every job. The selected local build must already be cached and loadable on the
 assigned GPU. `--dry-run` only prints jobs; it does not perform this preflight.
 ```bash
-colm-sweep create --sweep configs/rank_sweep/sweep.json --queue queues/rank-sweep-v4
-colm-sweep work --queue queues/rank-sweep-v4 --gpu 0 --dry-run    # print resolved jobs
-colm-sweep work --queue queues/rank-sweep-v4 --gpu 0              # run (the GPU id is required)
-colm-sweep summary --sweep configs/rank_sweep/sweep.json       # out/rank-sweep-v4/summary.md
+colm-sweep create --sweep configs/rank_sweep/sweep.json --queue queues/rank-sweep-v5
+colm-sweep work --queue queues/rank-sweep-v5 --gpu 0 --dry-run    # print resolved jobs
+colm-sweep work --queue queues/rank-sweep-v5 --gpu 0              # run (the GPU id is required)
+colm-sweep summary --sweep configs/rank_sweep/sweep.json       # out/rank-sweep-v5/summary.md
 ```
 Design, arms and timing: `TODO.md` ("LoRA rank sweep").
 

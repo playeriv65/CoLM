@@ -38,6 +38,7 @@ def test_a_plain_run_uses_the_paper_training_recipe_and_profiled_selection(tmp_p
     # the recipe of phi: fp16 AMP over fp32 weights, LoRA on q k v fc1 fc2
     assert training.fp16 and model.torch_dtype == "none"
     assert training.selection_prefix_dtype == "float16"
+    assert training.selection_prefix_fp32_tail == 2
     assert training.pack_tokens == 1536
     assert model.lora_target_modules == ["q_proj", "k_proj", "v_proj", "fc1", "fc2"]
     assert (model.lora_r, model.lora_alpha) == (128, 512)
@@ -73,6 +74,29 @@ def test_selection_prefix_precision_uses_profile_then_explicit_override(tmp_path
         )[2].selection_prefix_dtype
         == "float16"
     )
+
+
+def test_selection_prefix_fp32_tail_uses_profile_then_explicit_override(tmp_path):
+    def tail(*flags, config=None):
+        return _parse(tmp_path, *flags, config=config)[2].selection_prefix_fp32_tail
+
+    assert tail() == 2
+    assert tail(config={"selection_prefix_fp32_tail": 0}) == 0
+    assert tail("--selection_prefix_fp32_tail", "4") == 4
+    assert tail("--selection_prefix_fp32_tail=1", config={"selection_prefix_fp32_tail": 0}) == 1
+    # the profile's tail belongs to its float16 prefix: an explicit float32 prefix gets none
+    assert tail("--selection_prefix_dtype", "float32") == 0
+    assert tail("--selection_prefix_dtype=float32") == 0
+    assert tail(config={"selection_prefix_dtype": "float32"}) == 0
+    assert (
+        tail("--selection_prefix_dtype", "float16", config={"selection_prefix_dtype": "float32"})
+        == 2
+    )
+    # asking for both an fp32 prefix and a tail is an error at load
+    with pytest.raises(ValueError, match="needs selection_prefix_dtype=float16"):
+        tail("--selection_prefix_dtype", "float32", "--selection_prefix_fp32_tail", "2")
+    with pytest.raises(ValueError, match="must be >= 0"):
+        tail("--selection_prefix_fp32_tail", "-1")
 
 
 def test_selection_pack_budget_uses_profile_then_explicit_override(tmp_path):
@@ -199,6 +223,7 @@ def test_train_writes_the_resolved_config(tmp_path, tokenizer, mixture_file):
     )
     resolved = json.loads((tmp_path / "out" / "resolved_config.json").read_text())
     assert resolved["training"]["small_batch_ratio"] == 0.5  # a default
+    assert resolved["training"]["selection_prefix_fp32_tail"] == 0  # float32 prefix: no tail
     assert resolved["training"]["max_steps"] == 1 and resolved["model"]["lora_r"] == 4
     derived = resolved["derived"]
     assert (

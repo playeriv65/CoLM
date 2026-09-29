@@ -10,7 +10,8 @@ precision of every stage made explicit, so the arms of `docs/selection-precision
 from one shared prefix:
 
 * `F`  fp32 prefix, fp32 suffix (`selection_prefix_dtype=float32`);
-* `P`  fp16-autocast prefix promoted to fp32, fp32 suffix (`selection_prefix_dtype=float16`);
+* `P`  fp16-autocast prefix promoted to fp32, fp32 suffix (`selection_prefix_dtype=float16`,
+  `selection_prefix_fp32_tail=0`); `Pk` keeps the last k prefix blocks in fp32 (`fp32_tail=k`);
 * `H`  fp16 autocast for the prefix AND the suffix (the upstream regime; there is no library
   switch, so `all_half_extract` is patched into `MezoEfficient` by the training launcher only);
 * `R`  reference: the fp32 prefix state promoted to float64, then the last layer, final norm, head
@@ -21,7 +22,7 @@ from one shared prefix:
 """
 
 import copy
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 
 import numpy as np
 import torch
@@ -32,7 +33,7 @@ from colm.selection.facility_location import class_budgets
 from colm.selection.features import example_means
 from colm.selection.packing import label_counts, label_positions, model_inputs
 from colm.selection.select import CoresetSelector, Selection
-from colm.selection.zo import Prefix
+from colm.selection.zo import Prefix, promote
 
 LOW_DTYPE = torch.float16  # tests on CPU set bfloat16
 
@@ -49,17 +50,6 @@ def amp(device_type: str):
     return torch.autocast(device_type, dtype=LOW_DTYPE)
 
 
-def promote(value, dtype):
-    """Cast every floating tensor inside (nested) args / kwargs to `dtype`."""
-    if isinstance(value, torch.Tensor):
-        return value.to(dtype) if value.is_floating_point() else value
-    if isinstance(value, tuple):
-        return tuple(promote(item, dtype) for item in value)
-    if isinstance(value, dict):
-        return {key: promote(item, dtype) for key, item in value.items()}
-    return value
-
-
 def cast_state(state: Prefix, dtype) -> Prefix:
     return Prefix(promote(state.args, dtype), promote(state.kwargs, dtype))
 
@@ -71,41 +61,11 @@ def prefix_state(split, pack: dict, low: bool) -> Prefix:
         return split.prefix(**model_inputs(pack))
 
 
-@contextmanager
-def fp32_tail(split, k: int, device_type: str):
-    """Inside an fp16-autocast prefix: the last `k` layers of the prefix run in fp32.
-
-    A forward pre-hook on prefix layer `n - 1 - k` (n = number of decoder layers) casts the floating
-    inputs (hidden states, position embeddings, masks) to fp32 and enters `autocast(enabled=False)`,
-    which stays active until the prefix has stopped (the last layer's own pre-hook ends the forward).
-    `k = 0` is the plain fp16 prefix, `k = n - 1` an fp32 prefix.
-    """
-    if k <= 0:
-        yield
-        return
-    layer = len(split.layers) - 1 - k
-    disabled = torch.autocast(device_type, enabled=False)
-    entered = []
-
-    def pre_hook(module, args, kwargs):
-        disabled.__enter__()
-        entered.append(True)
-        return promote(args, torch.float32), promote(kwargs, torch.float32)
-
-    handle = split.layers[layer].register_forward_pre_hook(pre_hook, with_kwargs=True)
-    try:
-        yield
-    finally:
-        handle.remove()
-        if entered:
-            disabled.__exit__(None, None, None)
-
-
 def hybrid_prefix_state(split, pack: dict, k: int) -> Prefix:
     """Prefix in fp16 autocast with an fp32 tail of `k` layers, promoted to fp32 (arm Pk)."""
     device_type = pack["input_ids"].device.type
-    with torch.no_grad(), amp(device_type), fp32_tail(split, k, device_type):
-        state = split.prefix(**model_inputs(pack))
+    with torch.no_grad(), amp(device_type):
+        state = split.prefix(tail=k, device_type=device_type, **model_inputs(pack))
     return cast_state(state, torch.float32)
 
 

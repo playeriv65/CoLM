@@ -99,9 +99,11 @@ Per rank: 32 examples forwarded for selection, 16 trained (8 micro-batches of 2)
 - D1: keep F2 divisor (current) or normalise by valid tokens (changes selection).
 - D2: FP16 prefix / FP32 last-layer and loss was adopted in the Phi-2 profile
   (`selection_prefix_dtype=float16`; `float32` restores the old
-  prefix). It measured 1011 vs 1425 ms/step, but selected-set overlap is 13.0/16
-  against an FP32 packing floor of 15.17/16. Learning quality remains untested;
-  see `docs/fp16-prefix.md`.
+  prefix). The plain fp16 prefix measured 1011 vs 1425 ms/step, but selected-set overlap is
+  13.0/16 against an FP32 packing floor of 15.17/16; the user therefore decided on an fp32 tail of
+  two prefix blocks (`selection_prefix_fp32_tail=2`, about +3.6 % step time, overlap within the
+  floor). Learning quality remains untested; see `docs/fp16-prefix.md` and
+  `docs/selection-precision.md`.
 - D3: accept `enable_dropout=False` (no LoRA / residual dropout) to make O9 exact.
 - D4: whether O10 is acceptable.
 

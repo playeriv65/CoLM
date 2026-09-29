@@ -147,6 +147,18 @@ class MezoEfficient(Extractor):
             for p in module.parameters()
         ):
             raise ValueError("float16 selection prefix requires fp32 model weights")
+        self.fp32_tail = args.selection_prefix_fp32_tail
+        prefix_layers = len(self.split.layers) - 1
+        if not 0 <= self.fp32_tail <= prefix_layers:
+            raise ValueError(
+                f"selection_prefix_fp32_tail must be in [0, {prefix_layers}] "
+                f"(the model has {prefix_layers} prefix layers), got {self.fp32_tail}"
+            )
+        if self.fp32_tail and self.prefix_dtype != "float16":
+            raise ValueError(
+                f"selection_prefix_fp32_tail={self.fp32_tail} needs selection_prefix_dtype=float16 "
+                f"(got {self.prefix_dtype}); set selection_prefix_fp32_tail=0 for an fp32 prefix"
+            )
 
     def extract(self, pack):
         split, t = self.split, self.timer
@@ -158,7 +170,7 @@ class MezoEfficient(Extractor):
                 raise RuntimeError("float16 selection prefix requires CUDA")
             context = torch.autocast("cuda", dtype=torch.float16) if prefix_amp else nullcontext()
             with context:
-                state = split.prefix(**model_inputs(pack))
+                state = split.prefix(tail=self.fp32_tail, device_type="cuda", **model_inputs(pack))
             if prefix_amp:
                 state = state.float()
 

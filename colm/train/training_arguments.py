@@ -109,6 +109,18 @@ class TrainingArguments(HFTrainingArguments):
             "float16 requires fp32 model weights; the perturbed last layer, head, and loss stay fp32."
         },
     )
+    selection_prefix_fp32_tail: int = field(
+        default=0,
+        metadata={
+            "help": "Trailing decoder blocks of the float16 MeZO prefix (layers 0..n-2) that run in "
+            "fp32 instead of under autocast: their inputs are cast to fp32 at the first of them. "
+            "0: the whole prefix in fp16; the number of prefix layers: an fp32 prefix. Only "
+            "with selection_prefix_dtype=float16. The model profile sets the CLI default (Phi-2: "
+            "2, which cuts the fp16 error of g_i from 18 to 1 percent; other profiles 0, and 0 "
+            "whenever selection_prefix_dtype is overridden to float32); an explicit flag or "
+            "JSON value overrides it."
+        },
+    )
     train_max_tokens: int = field(
         default=1536,
         metadata={
@@ -238,6 +250,16 @@ class TrainingArguments(HFTrainingArguments):
         """Fail fast on inconsistent selection settings."""
         if not self.coreset:
             return
+        if self.selection_prefix_fp32_tail < 0:
+            raise ValueError(
+                f"selection_prefix_fp32_tail must be >= 0, got {self.selection_prefix_fp32_tail}"
+            )
+        if self.selection_prefix_fp32_tail and self.selection_prefix_dtype != "float16":
+            raise ValueError(
+                f"selection_prefix_fp32_tail={self.selection_prefix_fp32_tail} needs "
+                f"selection_prefix_dtype=float16 (got {self.selection_prefix_dtype}); "
+                "set selection_prefix_fp32_tail=0 for an fp32 prefix"
+            )
         if not 0 < self.small_batch_ratio <= 1:
             raise ValueError(f"small_batch_ratio must be in (0, 1], got {self.small_batch_ratio}")
         if self.efficient_mezo:

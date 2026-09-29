@@ -35,7 +35,9 @@ selection changes with fp32 reordering (20-step teacher-forced runs of the upstr
 themselves in 3 of 20 steps, mean overlap 13.5 of 16). The scalar `g_i` itself is accurate: on
 phi-2, fp32 with eps 1e-3 is within 1e-3 (median) of the exact directional derivative, fp16
 suffix forwards are noise (errors 0.05 to 12). The perturbed final layer and loss stay fp32;
-the unperturbed prefix now uses fp16 in the Phi-2 profile (`docs/fp16-prefix.md`).
+the unperturbed prefix uses fp16 in the Phi-2 profile, except its last two blocks
+(`selection_prefix_fp32_tail=2`), which stay fp32: a plain fp16 prefix has a median 18.5 % error in
+`g_i` (152 sign flips of 2560), the 2-block tail 1.15 % (19), full fp32 0.16 % (`docs/fp16-prefix.md`).
 Measured precision sweep of g_i, the selection and short learning runs: `docs/selection-precision.md`.
 The audit's E6 (weights of `weightedsubmodlib`) was a misreading: kept examples are scaled by the
 ratio too, the total is consistent.

@@ -1,15 +1,43 @@
-# FP16 decoder prefix with an FP32 MeZO suffix
+# FP16 decoder prefix with an FP32 tail and an FP32 MeZO suffix
 
-2026-09-29, implementation based on `3244c97`. The
-requested computation is exactly: run the first 31 Phi-2 decoder layers under
-CUDA FP16 autocast, promote their captured floating inputs to FP32, then replay
-the perturbed last layer, output head, and per-example cross entropy in FP32.
-The base weights and LoRA parameters remain stored in FP32. Selection attention
-remains stock SDPA; training attention remains stock FlashAttention-2. The
-Phi-2 model profile sets `selection_prefix_dtype=float16` and requires FP32
-model weights; `float32` retains the previous prefix computation. Command-line
-and JSON settings override the profile, and the resolved configuration records
-the chosen mode.
+2026-09-29, implementation based on `3244c97`; default changed to an fp32 tail of two blocks
+(user decision, see "Default: fp32 tail of 2 blocks" below). The computation is: run the first 31
+Phi-2 decoder layers (the prefix) under CUDA FP16 autocast, except the last
+`selection_prefix_fp32_tail` prefix blocks (default 2: blocks 29 and 30), which run in FP32; promote
+the captured floating inputs of the last layer to FP32, then replay the perturbed last layer,
+output head, and per-example cross entropy in FP32. The base weights and LoRA parameters remain
+stored in FP32. Selection attention remains stock SDPA; training attention remains stock
+FlashAttention-2. The Phi-2 model profile sets `selection_prefix_dtype=float16` and
+`selection_prefix_fp32_tail=2` and requires FP32 model weights; `selection_prefix_dtype=float32`
+retains the previous full FP32 prefix, and `selection_prefix_fp32_tail=0` the plain FP16 prefix
+that the sections below measured. Command-line and JSON settings override the profile, and the
+resolved configuration records the chosen mode.
+
+Everything from "Numerical check" to "Selection pack budget" below was measured with the plain FP16
+prefix (`selection_prefix_fp32_tail=0`) and is kept as the record of that arm (arm P of
+`docs/selection-precision.md`); its selection-overlap and timing numbers do not describe the new
+default.
+
+## Default: fp32 tail of 2 blocks
+
+`selection_prefix_fp32_tail=k` (integer, `0 <= k <= 31`, only with `selection_prefix_dtype=float16`;
+the Phi-2 profile default is 2, every other profile 0, and an explicit `float32` prefix gets 0
+unless a tail is asked for, which is an error) puts a forward pre-hook on prefix block `31 - k`
+(`LastLayerSplit._fp32_tail` in `colm/selection/zo.py`). The hook casts the block's floating inputs
+(hidden states, position embeddings, masks) to FP32 and enters `autocast(enabled=False)`; the
+prefix forward stops at the perturbed last layer, and the hook and the autocast switch are removed
+when `LastLayerSplit.prefix` returns. `k = 31` reproduces the `float32` prefix and `k = 0` the plain
+FP16 prefix (CPU tests with bf16 autocast, `tests/test_fp32_tail.py`).
+
+Evidence (`docs/selection-precision.md`, 512 examples x 5 directions against the exact float64
+derivative): median relative error of g_i 18.5 % (k = 0), 11.3 % (1), **1.15 % (2)**, 1.09 % (4),
+0.31 % (8), 0.16 % (full FP32); sign flips 152, 110, **19**, 15, 2, 2 of 2560. The error comes from the
+attention branch of blocks 29 and 30, whose attention logits reach ~1e5 and are rounded in FP16.
+The selection overlap of k = 2 with the exact selection is inside the FP32 noise floor. Cost: about
++3.6 % step time (~957 vs ~924 ms, estimated from per-layer prefix timings). A cheaper variant that
+keeps only q, k and softmax of blocks 29 and 30 in FP32 is not implemented.
+The library-path check of the shipped default is in the section "Library check of the default" at
+the end of this file.
 
 ## Numerical check
 
@@ -110,10 +138,12 @@ python -u scripts/check_prefix_precision.py \
 
 ## Decision
 
-The user chose this precision split for the Phi-2 recipe. Selection differs
-beyond the FP32 packing noise, which is disclosed above. The result demonstrates
-stable execution and a speed gain, not equal
-learning quality. A paired learning-curve comparison remains the next check.
+The user first chose the plain FP16 prefix split (k = 0) for the Phi-2 recipe. Selection differed
+beyond the FP32 packing noise, which is disclosed above, and the result demonstrated stable
+execution and a speed gain, not equal learning quality. After the precision study
+(`docs/selection-precision.md`) the user made the FP16 prefix with an FP32 tail of 2 blocks the
+default: it removes the measured selection difference at about +3.6 % step time. A paired
+learning-curve comparison of k = 2 is still not run.
 
 ## Selection pack budget after the FP16 prefix
 
@@ -143,3 +173,35 @@ alone. The larger budget ran without an OOM or an increase in the training
 memory peak. The Phi-2 profile now uses 1536; `--pack_tokens 0` restores the
 data-derived budget. Raw config, step JSONL, memory, and logs are under
 `$COLM_ARTIFACT_ROOT/artifacts/CoLM/fp16-select-pack1536-20260929/`.
+
+## Library check of the default (fp32 tail of 2 blocks)
+
+2026-09-29, physical GPU 2, shared: the machine load average was 17-33 and other users' jobs
+appeared on the card during the run, so timings below are not exclusive.
+
+Accuracy through the library path (`MezoEfficient` with `selection_prefix_fp32_tail=2`, not the
+script-local arm): `scripts/measure_selection_precision.py --pools 8 --directions 3
+--library-tail 2` (256 examples x 3 directions = 768 values of g_i, the adapter and pools of
+`docs/layer-signal.md`, TF32 off, eps 1e-3, 1536-token packs) against the exact float64
+derivative R:
+
+| arm | median rel. err. | p90 rel. err. | sign flips / 768 | Pearson |
+|---|---:|---:|---:|---:|
+| P (plain fp16 prefix, k = 0) | 20.3 % | 117 % | 44 | 0.9849 |
+| library, k = 2 | **1.18 %** | 9.7 % | **4** | 0.9999 |
+| F (fp32 prefix) | 0.15 % | 1.1 % | 0 | 1.0000 |
+
+This reproduces the study's k = 2 numbers (1.15 % median, 19 of 2560 = 0.7 % sign flips). The
+library arm also agrees with F to 1.16 % (median), 4 sign flips.
+
+One 30-step `colm-train` run with the new Phi-2 default (`configs/timing_phi2_efficient_coarse`
+settings with `max_steps=30`, coarse timing, seed 0, W&B off; the resolved config records
+`selection_prefix_dtype=float16`, `selection_prefix_fp32_tail=2`, `pack_tokens=1536`) trained
+without error: loss 0.79-0.84 at steps 29-30. Steps 11-30 (20 steps, not exclusive, only an
+indication): 1031 ms per step, of which selection 447 ms (features 442 ms) and training 464 ms;
+6,199 forwarded selection tokens per step on average. Peak allocated memory 32.30 GB in the
+training phase (13.0 GB in the selection phase), reserved 41.24 GB: unchanged from the plain FP16
+prefix (32.30 / 41.73 GB above). The stage-level cost of the tail (+3.6 % of the step) is the
+per-layer estimate of `docs/selection-precision.md`; this run cannot resolve it because the
+machine load varied. Raw outputs are under
+`$COLM_ARTIFACT_ROOT/artifacts/CoLM/fp32-tail-20260929/`.

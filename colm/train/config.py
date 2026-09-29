@@ -58,6 +58,17 @@ def eval_dtype(model_name_or_path: str) -> str:
     return "float16" if profile["precision"] == "fp16_amp" else "bfloat16"
 
 
+def flag_value(argv: list[str], name: str):
+    """Last value of `--name value` / `--name=value` in `argv` (None when absent)."""
+    value = None
+    for i, arg in enumerate(argv):
+        if arg == f"--{name}" and i + 1 < len(argv):
+            value = argv[i + 1]
+        elif arg.startswith(f"--{name}="):
+            value = arg.split("=", 1)[1]
+    return value
+
+
 def parse_args(argv: list[str] | None = None):
     """(model, data, training, eval) arguments from a JSON file and / or flags."""
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -89,6 +100,16 @@ def parse_args(argv: list[str] | None = None):
         extra["lora_target_modules"] = profile["lora_target_modules"]
     if "selection_prefix_dtype" not in defaults:
         extra["selection_prefix_dtype"] = profile["selection_prefix_dtype"]
+    # The fp32 tail belongs to the profile's fp16 prefix: another explicit dtype gets no tail.
+    prefix_dtype = (
+        flag_value(argv, "selection_prefix_dtype")
+        or defaults.get("selection_prefix_dtype")
+        or profile["selection_prefix_dtype"]
+    )
+    if "selection_prefix_fp32_tail" not in defaults:
+        extra["selection_prefix_fp32_tail"] = (
+            profile["selection_prefix_fp32_tail"] if prefix_dtype == "float16" else 0
+        )
     if "pack_tokens" not in defaults:
         extra["pack_tokens"] = profile["pack_tokens"]
     if not model_args.attn_implementation and model_args.precision != "fp32":

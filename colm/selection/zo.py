@@ -1,6 +1,7 @@
 """Zeroth-order (MeZO) building blocks: the perturbed parameters and the last-layer split."""
 
 import logging
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Any
 
@@ -84,6 +85,17 @@ class _PrefixDone(Exception):
     """Raised by the hook on the last layer to stop the forward once its input is captured."""
 
 
+def promote(value, dtype: torch.dtype):
+    """Cast every floating tensor inside (nested) args / kwargs to `dtype`."""
+    if isinstance(value, torch.Tensor):
+        return value.to(dtype) if value.is_floating_point() else value
+    if isinstance(value, tuple):
+        return tuple(promote(item, dtype) for item in value)
+    if isinstance(value, dict):
+        return {key: promote(item, dtype) for key, item in value.items()}
+    return value
+
+
 @dataclass
 class Prefix:
     args: tuple
@@ -91,17 +103,7 @@ class Prefix:
 
     def float(self) -> "Prefix":
         """Promote floating prefix outputs before the perturbed fp32 suffix replay."""
-
-        def promote(value):
-            if isinstance(value, torch.Tensor) and value.is_floating_point():
-                return value.float()
-            if isinstance(value, tuple):
-                return tuple(promote(item) for item in value)
-            if isinstance(value, dict):
-                return {key: promote(item) for key, item in value.items()}
-            return value
-
-        return Prefix(promote(self.args), promote(self.kwargs))
+        return Prefix(promote(self.args, torch.float32), promote(self.kwargs, torch.float32))
 
 
 class LastLayerSplit:
@@ -134,24 +136,59 @@ class LastLayerSplit:
         """Parameter name relative to the last layer (`...layers.31.self_attn.x` -> `self_attn.x`)."""
         return name.split(self.last_name, 1)[1]
 
-    def prefix(self, **inputs) -> Prefix:
+    @contextmanager
+    def _fp32_tail(self, k: int, device_type: str):
+        """Run the last `k` prefix layers in fp32 inside an enclosing autocast.
+
+        A forward pre-hook on prefix layer `n - 1 - k` (n = number of decoder layers) casts the
+        floating inputs (hidden states, position embeddings, masks) to fp32 and enters
+        `autocast(enabled=False)`. Both are undone on exit, so nothing leaks out of the forward.
+        `k = 0` changes nothing; `k = n - 1` is an fp32 prefix (embeddings aside).
+        """
+        if not 0 <= k <= len(self.layers) - 1:
+            raise ValueError(f"fp32 tail must be in [0, {len(self.layers) - 1}] layers, got {k}")
+        if k == 0:
+            yield
+            return
+        disabled = torch.autocast(device_type, enabled=False)
+        entered = []
+
+        def pre_hook(module, args, kwargs):
+            if not entered:
+                disabled.__enter__()
+                entered.append(True)
+            return promote(args, torch.float32), promote(kwargs, torch.float32)
+
+        handle = self.layers[len(self.layers) - 1 - k].register_forward_pre_hook(
+            pre_hook, with_kwargs=True
+        )
+        try:
+            yield
+        finally:
+            handle.remove()
+            if entered:
+                disabled.__exit__(None, None, None)
+
+    def prefix(self, *, tail: int = 0, device_type: str = "cuda", **inputs) -> Prefix:
+        """Decoder up to the last layer, under the caller's autocast, with `tail` layers in fp32."""
         captured = {}
 
         def hook(module, args, kwargs):
             captured["value"] = Prefix(args, kwargs)
             raise _PrefixDone
 
-        handle = self.last.register_forward_pre_hook(hook, with_kwargs=True)
-        try:
+        with self._fp32_tail(tail, device_type):
+            handle = self.last.register_forward_pre_hook(hook, with_kwargs=True)
             try:
-                self.decoder(**{"use_cache": False, **inputs})
-            except _PrefixDone:
-                pass
-        finally:
-            handle.remove()
+                try:
+                    self.decoder(**{"use_cache": False, **inputs})
+                except _PrefixDone:
+                    pass
+            finally:
+                handle.remove()
         state = captured["value"]
         if not self._verified:
-            self._verify(inputs, state)
+            self._verify(inputs, state, tail, device_type)
         return state
 
     def hidden(self, state: Prefix, overrides: dict[str, torch.Tensor] | None = None):
@@ -163,9 +200,12 @@ class LastLayerSplit:
         logits = self.head(self.hidden(state, overrides))
         return logits.to(torch.promote_types(logits.dtype, torch.float32))
 
-    def _verify(self, inputs, state) -> None:
-        reference = self.decoder(**{"use_cache": False, **inputs}).last_hidden_state
-        replay = self.hidden(state)
+    def _verify(self, inputs, state, tail: int, device_type: str) -> None:
+        """The replay reproduces the forward under the same precision regime as the prefix."""
+        with self._fp32_tail(tail, device_type):
+            reference = self.decoder(**{"use_cache": False, **inputs}).last_hidden_state
+            with torch.autocast(device_type, enabled=False) if tail else nullcontext():
+                replay = self.hidden(state)
         if not torch.allclose(replay, reference, rtol=1e-4, atol=1e-5):
             raise RuntimeError("the last-layer split does not reproduce the model's forward")
         self._verified = True

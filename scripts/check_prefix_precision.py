@@ -166,6 +166,7 @@ def main():
             extractor_args = SimpleNamespace(
                 mezo_eps=args.eps,
                 selection_prefix_dtype=dtype,
+                selection_prefix_fp32_tail=0,
                 mezo_selection="grad",
             )
             extractor = MezoEfficient(extractor_args, model, params, args.seed)
