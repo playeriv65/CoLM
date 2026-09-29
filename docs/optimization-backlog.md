@@ -1,9 +1,12 @@
 # Selection / step optimisation backlog
 
-> Status: optimisation work is stopped. The numbers below were measured on the padded upstream
-> path (`legacy`); the default path is packed without padding (`docs/errors.md`), so the token
-> counts, the padding findings and the per-step times no longer apply as they are. F4 below is
-> corrected (26.9%, not 36.9%).
+> Status: the exact (execution-only) items O1, O3, O5, O6, O7, O8 and the host items are done on the
+> refactored code; results at the end of this file ("Execution-only optimisations on the
+> refactored code"). Still open: O11 (optional), and the items that are user decisions (O2, O9,
+> O10, D1-D4). The per-step numbers of the older sections were measured on the padded upstream
+> path (`legacy`, 512-truncated data): the default path is packed without padding and untruncated
+> (`docs/errors.md`), so their token counts and step times do not apply to it. F4 is corrected
+> (26.9%, not 36.9%).
 
 Goal: make a CoLM training step faster **without changing the mini-batch selection semantics**.
 Every item states whether it is bitwise-exact, mathematically exact (float rounding only), or a
@@ -62,16 +65,19 @@ Per rank: 32 examples forwarded for selection, 16 trained (8 micro-batches of 2)
 
 | id | change | exactness | notes |
 |---|---|---|---|
-| O1 | Skip the ZO forward for `keep_sources` examples and for sources with a zero quota | math-exact | ~37% of the selection forward. Needs source ids all-gathered before the forward (multi-GPU). Sources selected in full still need g_i (Adam state update). Keep F2 divisor. |
+| O1 | Skip the ZO forward for `keep_sources` examples and for sources with a zero quota | math-exact | ~37% of the selection forward. Needs source ids all-gathered before the forward (multi-GPU). Sources selected in full still need g_i (Adam state update). Keep F2 divisor. **Done** (`CoresetSelector.needed`; 27.5% of the examples and 25.3% of the tokens skipped on the recipe). |
 | O2 | fp16 autocast around the ±eps final-layer ZO calls | precision change | upstream was fp32 too (F3 correction); decide with D2. Measured: 290 ms/step fp32 |
-| O3 | Gather the 32 scalars g_i per rank instead of `[32, 327680]` fp32 features; rank 0 regenerates z from the seed | bitwise | removes 42 MB/rank D2H + pickle + gather + H2D; multi-GPU only. Move gathered example tensors to CPU (or gather indices) to avoid cross-device CUDA contexts. |
+| O3 | Gather the 32 scalars g_i per rank instead of `[32, 327680]` fp32 features; rank 0 regenerates z from the seed | bitwise | removes 42 MB/rank D2H + pickle + gather + H2D; multi-GPU only. Move gathered example tensors to CPU (or gather indices) to avoid cross-device CUDA contexts. **Done** (`Extractor.expand`). |
 | O4 | Drop KV cache + deepcopy in the selection forward | math-exact | done in the port |
-| O5 | lm_head + CE only at label positions in the ZO final layer (keep F2 divisor) | math-exact | lm_head is the largest part of each ±eps call |
-| O6 | Packed inputs: training (pack each original sub-batch → identical token mean; bigger packs with per-token weights), selection (pack + per-segment loss sum / original divisor) | math-exact | combine with O1/O5; `use_cache=False` (F5) |
-| O7 | Attention backend: identify the SDPA backend actually used; test `varlen_attn` on sm_120; flex_attention | kernel only | flash needs fp16/bf16 (see decision D2) |
-| O8 | Train the 16 selected examples in 1–2 large batches with per-token weights reproducing the per-sub-batch means | math-exact (dropout masks differ) | bs 2 micro-batches underuse the GPU |
+| O5 | lm_head + CE only at label positions in the ZO final layer (keep F2 divisor) | math-exact | lm_head is the largest part of each ±eps call. **Done** in the refactor (M1; the divisor is the example's own label count, E2). |
+| O6 | Packed inputs: training (pack each original sub-batch → identical token mean; bigger packs with per-token weights), selection (pack + per-segment loss sum / original divisor) | math-exact | combine with O1/O5; `use_cache=False` (F5). **Done** in the refactor. |
+| O7 | Attention backend: identify the SDPA backend actually used; test `varlen_attn` on sm_120; flex_attention | kernel only | flash needs fp16/bf16 (see decision D2). **Done**: `colm_varlen` (torch `varlen_attn` for the fp16 training, the efficient kernel with cumulative lengths for the fp32 selection); flash-attn 2 measured, no gain (below). |
+| O8 | Train the 16 selected examples in 1–2 large batches with per-token weights reproducing the per-sub-batch means | math-exact (dropout masks differ) | bs 2 micro-batches underuse the GPU. **Done** (one pack per step, or packs under a token budget derived from GPU memory). |
 | O9 | Reuse selection-forward activations for the training backward | needs D3 | Blockers: eval vs train dropout, fp32 vs fp16, backward cannot drop unselected rows of a batched graph. Viable variant: per-example graphs, backward only the selected ones; est. −16% compute, 40–50 GB activation memory (estimate). |
 | O10 | 1-D facility location on r_i (F1) | approximate (adam-ε, ties) | needs D4 |
+| O11 | Last decoder layer of the ±eps calls: queries, attention output and MLP only at label positions (K/V for every token) | math-exact | **Not done**: needs a per-architecture layer (the replay is the model's own layer module); est. −20 ms of 1324. |
+| O12 | LoRA merged into the base weights for the fp32 selection forward (W + s·B·A per layer, once per step) | math-exact up to fp32 rounding | **Not done, measured candidate**: LoRA's skinny GEMMs and its scale/add passes are 27% of the prefix GPU time (profile below); merging costs ~20 ms per step; est. −150 ms of 1324. Needs the whole selection in one pack and non-destructive merged weights (E-drift). |
+| O13 | fp32 GEMM in the NN layout: `x @ W^T` runs at 54 TFLOP/s, `x @ Wt` (weights stored transposed) at 70 on this GPU | math-exact up to rounding | **Not done, measured**: est. −130 ms (the base GEMMs are 74% of the prefix); needs a second (transposed) copy of the weights or a custom linear. |
 
 ## Open decisions (user)
 
@@ -137,3 +143,124 @@ padded and the kept-source rows it processes (O1, O6), then lm_head at label pos
 and the fp32 final layer (F3/O2); training is overhead-bound at micro-batch 2 (O8). Host
 walks (`model.eval()` ×3 and `model.train()` per micro-batch, HF flop counting) cost ≈ 150 ms
 (5%) per step and are bitwise-free to remove.
+
+
+## Execution-only optimisations on the refactored code (2026-09-28)
+
+Baseline is the refactored main `fe4ccfc` (packed batches, fp32 selection, fp16 training, LM head at
+label positions, no truncation, per-example loss = mean of its own label tokens). Nothing here
+changes the algorithm; `docs/errors.md` semantics are untouched, the fp32 selection forward and
+the fp16 AMP training are unchanged (no fp16 selection, no TF32, O9 not touched).
+
+What changed and its exactness class (code in `colm/selection/`, `colm/train/trainers.py`):
+
+| item | change | class | evidence |
+|---|---|---|---|
+| O1 | `CoresetSelector.needed(sources, total)` decides from the source ids, before any forward, which features can change the selection; the others are not computed (zeros, never read). The pool is all-gathered first (cheap), the needed examples are shared over the ranks by token count (`balanced_shares`). Skipped: `keep_sources`, sources with zero quota, sources selected in full when `mezo_optim=sgd`; everything if the kept examples fill the budget. With random tie-breaks (`balanced`), sampled coordinates, a global coordinate ranking (`source_wise_selection=none`) or a pool transform only the kept sources are skipped. | math-exact | float64 CPU: randomised pools/sources/quotas, indices, weights and the Adam moments identical (`tests/test_opt.py`), trainer path identical over 4 steps with kept sources / adam / sgd; 2- and 4-rank gloo runs identical to one process. |
+| O3 / M2 | The MeZO extractor returns g_i (one scalar per example); rank 0 builds the features `g_i z` (`Extractor.expand`, z from the same seeded generator). Only scalars are gathered: no `[N, 327680]` D2H, pickle, gather, H2D. | bitwise on the same g_i | feature matrix = `g[:, None] * z` with `atol=0`; g_i bit-identical whatever the packing in float64. z is regenerated on rank 0: identical to the other ranks' z on GPUs of one architecture. |
+| O8 | The selected examples of a step go through as few packed forwards as GPU memory allows: one pack unless the step exceeds the token budget derived from memory (`train_memory_fraction`, default 0.9; `train_token_budget`: two probes of a forward + backward on the second step give MiB per token and the fixed part, the budget is checked by a probe at its own size and shrinks or halves on out-of-memory). The loss is a token sum over the step divided by the step's label count: independent of the grouping. `SubsetTrainer` packs too. | math-exact (fp rounding order; dropout masks differ, as for any re-batching) | float64: gradients of one pack / packs under a budget = the micro-batch loop to 1e-9 (weighted and unweighted), loss to 1e-12. GPU, fp32 with exact attention: micro-batch packs vs the new packs 1.3e-3 relative gradient difference (max 1.9e-3), loss 1.5e-6 (the fp32 floor). |
+| O7 | Training attention kernel unchanged: torch `varlen_attn` (flash) on the packed fp16 rows. flash-attn 2.8.3 (built for sm_120) gives the same numbers (relative 7e-6 to 2e-5 between the two kernels, both 2.4e-4 to 3.8e-4 from fp32 per sequence) and no speed-up (fwd+bwd of one layer, 16 x 220 tokens: 0.42 ms torch, 0.49 ms flash-attn; 6k tokens: 0.99 vs 1.00; 2 x 2048: 0.90 vs 0.91): not adopted, no dependency, no build. End to end, fp16 gradient against the exact fp32 gradient (relative, cosine): `colm_varlen` 0.44 (0.90) one pack of 16 examples, 0.41 (0.94) one example per forward; stock fp16 sdpa 1.17 (0.65) (`docs/errors.md`). | kernel only | see left; the fp16 gradient error is the pending precision decision. |
+| H | Label geometry (positions, targets, segment, counts) computed on the CPU in `pack` (no `nonzero` / `bincount` synchronisation in the losses); `ModeSwitch`: flat flag pass instead of the recursive `train()` walk (4 ms -> 0.3 ms per switch, PreTrainedModel's override is skipped only while `use_kernels` is off); `dataloader_num_workers=1` (tokenising the next pool overlaps the step: 11.5 ms); the unused pool norm of `mezo_transform=none` is no longer computed; `_features` casts to at least fp32 (float64 stays). | bitwise / host only | worker: same pools (test); mode switch: same flags on all modules (test); the census below. |
+| O11 | not done (per-architecture layer replay). | | |
+
+### Measured (phi-2, `configs/timing_phi2_efficient.json`)
+
+Protocol: `--profile_timing fine`, 130 steps, 10 warm-up dropped, means over steps 11-130, closure
+against the step wall clock, 50-step sliding mean, W&B off, no GPU sampling, physical GPU 0 alone
+(other agents' jobs on other GPUs and their host load: loadavg is recorded). Same seed, so the
+same pools in the same order; the trained sets differ slightly (fp32 rounding decides ties). The
+old column is the previous baseline on the old code (`Measured baseline` below: 512-truncated
+data, padded; not comparable, kept for reference). One run per column.
+
+| phase (ms / optimizer step) | old code, padded (09-28) | main `fe4ccfc` | optimised |
+|---|---:|---:|---:|
+| **step** (wall clock between optimizer steps) | 2868 | 2329 | 1324 |
+| selection | 1869 | 1221 | 886 |
+| · prefix: 31 layers, fp32 | 1525 | 1029 | 774 |
+| · ±eps final layer + LM head + loss (2 calls) | 290 | 135 | 101 |
+| · features D2H | 20 | 21 | 0 |
+| · rank-0 selection | 16 | 15 | 3 |
+| · other selection (mode walk, pack, plan, expand) | 5 | 20 | 7 |
+| train | 917 | 1079 | 419 |
+| · forward | 394 | 511 | 182 |
+| · backward | 478 | 560 | 236 |
+| · mode walk, prepare, other | 28 | 8 | 1 |
+| optimizer | 18 | 8 | 8 |
+| HF loop, data, log (top-level other) | 61 | 22 | 11 |
+| p90 step | 3154 | 2625 | 1604 |
+| closure residual (ms, % of step) | 2.6 (0.09) | 21.8 (0.94) | 10.6 (0.80) |
+| 50-step sliding mean, max deviation | 1.5% | 1.9% | 4.9% |
+| loadavg start / end | 12.1 / 19.4 | 12.3 / 26.4 | 22.1 / 20.8 |
+
+Per step (means): pool 7,850 tokens; MeZO forward on 23.2 of 32 examples, 5,863 tokens (74.7% of
+the pool's tokens); trained 3,727 tokens in 1.0 forward (main: 8-9 forwards). The prefix costs
+132 us per forwarded token in both columns (1029/7850, 774/5863): linear in tokens. The step
+time of the optimised run is a function of the token counts (least squares over the 120 steps:
+0.154 ms per forwarded token + 0.130 ms per trained token - 65 ms, R^2 = 0.99; correlation with
+the forwarded tokens 0.96), so the 50-step deviation is the data (both runs saw the same pools);
+the optimised run sits at the 5% edge because the fixed part of the step is smaller.
+
+Production step time (`profile_timing=off`, no synchronisation; `step_time_s` of the trainer log,
+steps 11-130, same protocol otherwise): main 2317 ms (sliding +-1.5%), optimised 1305 ms (+-4.7%,
+0.9 fraction): **1.78x**; the fine timers cost <= 1.5% on both. Peak GPU memory (allocated, training
+phase; selection 13.1 GB in both): main 32.3 GB, optimised 62.2 GB with the default budget of
+8,599 tokens per forward (reserved 90.8 GB): one pack of the whole step holds ~8 MiB per token
+(measured: 7.92 MiB per token + 17.9 GB fixed, the check at the derived size 84.0 of 84.4 GB).
+
+Training memory against time (`profile_timing=off`, one run each, same pools; the derived budget is
+`(fraction x available - fixed) / slope`, 7.92 MiB per token, 17.9 GB fixed, 93.8 GB available):
+
+| `train_memory_fraction` | tokens per forward | step (ms) | peak training memory (allocated) | reserved | mean loss, 130 steps |
+|---|---:|---:|---:|---:|---:|
+| main `fe4ccfc` (8-9 forwards of ~450 tokens) | - | 2317 | 32.3 GB | 35.4 GB | 0.689 |
+| 0.9 (default) | 8,599 | 1305 | 62.2 GB | 90.8 GB | 0.692 |
+| 0.5 | 3,746 | 1316 | 45.9 GB | 79.1 GB | 0.690 |
+| 0.3 | 1,322 | 1380 (loadavg 28: noisy, 50-step deviation 8%) | 32.4 GB | 36.7 GB | 0.699 |
+
+The trained tokens of a step are 3.7k on average (5.2k at most in steps 11-130, always one forward at the 0.9 budget), so a budget
+of 3.7k already runs most steps as one forward: 0.5 costs 0.8% against 0.9 and saves 16 GB. The
+first loss is identical to main (0.8853), later ones differ through fp32 tie-breaks and dropout
+masks; the 130-step means agree within 0.01 (noise of that size between runs is expected: one
+seed).
+
+Census (steps 2-10, syncing CUDA calls per step): selection 166 -> 120 (88 of them are the
+host-to-device copies of the packs, done before any kernel is queued; the `nonzero` / `bincount`
+of the losses are gone: 40 per step), training 101 -> 14 (forward 27.7 -> 2.0), feature D2H
+42 MB -> 91 bytes, rank-0 H2D 42 MB -> 0.24 MB.
+
+Reading: what is left is the fp32 prefix (58% of the step; precision decisions D2/O12/O13 only),
+the fp16 training forward + backward (32%; 3.7k tokens in one pack), the
+±eps final layers (7.6%) and 0.8% top-level HF loop.
+
+Raw logs (machine-local, not in git): `logs/opt-2026-09-28/` of the main worktree on pro6000
+(fine-timing jsonl and summaries of both columns, the `off` runs' trainer states and memory,
+the GPU check).
+
+### Checks on the GPU (phi-2, teacher forced, `scripts/check_opt.py`)
+
+20 steps on GPU 2 (shared with another job, `train_memory_fraction=0.3`, so packs of ~1k tokens),
+at every step from the same weights, pool and selector state: the plain path (all features, pack
+by pack) vs the optimised `_select`, and the plain path with the pool reversed (other packs:
+the noise floor of fp32 rounding).
+
+| | optimised vs plain | plain (reversed) vs plain |
+|---|---:|---:|
+| identical selected set (of 20 steps) | 9 | 2 |
+| mean overlap of the 16 selected | 14.90 | 13.65 |
+| median relative difference of g_i | - | 1.0e-3 |
+
+Examples forwarded: 70.3% of the pool. Median relative difference of the selector's Adam moments
+after the step 1.1e-2 (0 to 3e-4 in the steps with the same selected set). Gradients of the
+selected examples (dropout off, 8 steps): optimised packs vs micro-batch packs in fp16 AMP 0.48
+relative (the fp16 gradient itself is 0.62 (cosine 0.84) from the exact fp32 gradient for the
+micro-batch packs and 0.63 (0.83) for the new packs: the same precision class; repeating the fp16
+run alone differs by 0.047); in fp32 with exact attention the two groupings differ by 1.3e-3
+(the packing is exact), loss 1.5e-6, grad-norm ratio new / plain 0.99 (0.95-1.05 in fp16).
+
+### Not done, measured (candidates)
+
+Profile of the fp32 prefix (3.8k tokens, 482 ms, `torch.profiler`): GEMM 79% of the GPU time
+(`cutlass_80_simt_sgemm` 128x256 / 256x128, TN layout, 54 TFLOP/s; the same GEMM as `x @ Wt` (NN)
+reaches 70 TFLOP/s: O13), LoRA (skinny GEMMs + `mul` + `add`) 27%: O12, layer-norm / GELU /
+attention the rest. O11 and the memoisation of the parallel MLP in the ±eps replays (Phi's MLP
+does not depend on v_proj: ~17 ms) are each worth ~1.5% and need per-architecture code.

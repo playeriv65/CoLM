@@ -7,7 +7,7 @@ commit / result pointer, delete them once they are recorded in docs. Optimisatio
 ## In progress
 
 - [ ] Nothing in progress: the refactor is merged (`legacy` switch removed; tags `pre-refactor`
-      and `legacy-bridge`).
+      and `legacy-bridge`) and so are the execution-only step optimisations (below).
 
 ## Next
 
@@ -20,8 +20,12 @@ commit / result pointer, delete them once they are recorded in docs. Optimisatio
 - [ ] Precision decisions with evidence in `docs/errors.md` (fp16 attention gradients; fp32
       selection forward must stay), not switched without a decision.
 - [ ] Make evaluation report loss as well as accuracy in `math_eval` (accuracy only today).
-- [ ] Optimisation (stopped): `docs/optimization-backlog.md`; the features could be gathered as
-      32 scalars, the base weights stored once (fp32 + per-forward fp16 copies today).
+- [ ] Optimisation, open candidates (`docs/optimization-backlog.md`): O12 LoRA merged into the fp32
+      selection forward (est. -150 ms of 1305), O13 fp32 GEMMs in the NN layout (est. -130 ms), O11
+      final layer at label positions (est. -20 ms), the base weights stored once (fp32 +
+      per-forward fp16 copies today). All are precision-neutral but O12/O13 need extra memory or a
+      custom linear: not started. The training peak memory is now 62 GB (was 32 GB): decide the
+      default of `train_memory_fraction` (0.9 uses ~60-84 GB; 0.5: see the backlog table).
 
 ## Experiments
 
@@ -48,11 +52,12 @@ commit / result pointer, delete them once they are recorded in docs. Optimisatio
       `CoLM-rank-sweep`. Job order: base eval loss, then per arm train -> eval loss -> eval accuracy,
       then a CPU summary (`out/rank-sweep-v2/summary.{json,md}`). Results/logs: `out/rank-sweep-v2/<run>/`,
       `logs/rank-sweep-<job>-r<r>-a<alpha>-<steps>steps-seed<seed>-<timestamp>.log`.
-      Estimate (baseline 2868 ms/step): ~49 min training + 4 in-training evaluations x 26 s (measured:
+      Estimate (optimised code: 1305 ms/step measured for r = 128, 1024 steps = ~22 min; the old
+      code had 2868 ms/step = ~49 min): ~22 min training + 4 in-training evaluations x 26 s (measured:
       13.7 s held-out + 11.8 s GSM8K) + ~1 min load, ~20 s standalone loss job, vLLM accuracy job
       ~2.5 min engine start + PoT/CoT generation and program execution for ~10k prompts per
       checkpoint (execution alone ~43 ms x 10k = 7 min; total not yet measured, guess 15-30 min per
-      arm for both checkpoints). About 1.3 h per arm, ~6.5-7 h for the queue (drop checkpoint 512
+      arm for both checkpoints). About 0.9 h per arm, ~4.5 h for the queue (was 1.3 h and 6.5-7 h; drop checkpoint 512
       from `eval.checkpoints` to save ~10 min per arm). Training peak memory (maximum over the ranks,
       per phase) is in `memory.json` / `summary.md`.
       Smoke test of the whole chain (passed 2026-09-28 on GPU 0: train -> checkpoints -> eval loss
@@ -73,6 +78,10 @@ commit / result pointer, delete them once they are recorded in docs. Optimisatio
 
 ## Done
 
+- 2026-09-28 Execution-only step optimisations on the refactored code (skip unused MeZO forwards,
+  gather g_i scalars, one packed training forward under a memory-derived token budget, host
+  overhead): 2317 -> 1305 ms/step on phi-2 (1.78x), same selections up to fp32 rounding
+  (`docs/optimization-backlog.md`, `scripts/check_opt.py`, `tests/test_opt.py`).
 - 2026-09-28 Refactor: HF-native trainers (one pool = one HF batch), `colm/selection`, packed
   padding-free batches, per-rank peak memory, entry points and config with the paper recipe as
   default, errors fixed (`docs/errors.md`), goldens of the upstream code (`tests/equivalence`).

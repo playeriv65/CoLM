@@ -47,6 +47,13 @@ class TrainingArguments(HFTrainingArguments):
         default=True, metadata={"help": "Checkpoints hold the adapter only (no optimizer state)."}
     )
     seed: int = field(default=0)
+    dataloader_num_workers: int = field(
+        default=1,
+        metadata={
+            "help": "Worker processes of the data loader: one tokenises the pool of the next step "
+            "(11 ms of 32 examples) while the GPU works on this one."
+        },
+    )
     remove_unused_columns: bool = field(
         default=False,
         metadata={
@@ -78,10 +85,20 @@ class TrainingArguments(HFTrainingArguments):
     pack_tokens: int = field(
         default=0,
         metadata={
-            "help": "Tokens per packed forward pass. 0: the tokens of one micro-batch of the padded "
-            "recipe (micro batch size x mean example length of the data), for the selection "
-            "forwards; the trained fraction of it for the training forwards. A forward always "
-            "holds at least one example."
+            "help": "Tokens per packed forward pass (a forward always holds at least one example). "
+            "0: selection forwards hold the tokens of one micro-batch of the padded recipe "
+            "(micro batch size x mean example length of the data); training forwards hold as many "
+            "tokens as fit in GPU memory (measured after the first step, see "
+            "train_memory_fraction), i.e. the selected examples of a step usually go through one "
+            "forward."
+        },
+    )
+    train_memory_fraction: float = field(
+        default=0.9,
+        metadata={
+            "help": "Share of the GPU memory available to the process that the training packs "
+            "may fill (headroom for allocator fragmentation and the gathered selection state). "
+            "Used when pack_tokens is 0."
         },
     )
     data_selection_method: Literal["submodlib", "weightedsubmodlib", "none"] = field(

@@ -16,12 +16,12 @@ import time
 
 import numpy as np
 import torch
-from transformers import Trainer
+from transformers import PreTrainedModel, Trainer
 
 from colm.data.superglue import classification_loss
 from colm.selection.batching import PackedBatching
 from colm.selection.features import build_extractor
-from colm.selection.packing import META
+from colm.selection.packing import META, Example, balanced_shares, pack
 from colm.selection.pool import (
     all_gather_object,
     broadcast_object,
@@ -32,12 +32,37 @@ from colm.selection.pool import (
 from colm.selection.select import CoresetSelector
 from colm.selection.zo import zo_parameters
 from colm.train import attention
-from colm.train.memory import MemoryMeter
+from colm.train.memory import MemoryMeter, train_token_budget
 from colm.train.step_timing import StepTimer, StepTimingCallback
 
 logger = logging.getLogger(__name__)
 
 INDICES_DIRNAME = "indices"
+
+
+class ModeSwitch:
+    """`model.train(mode)` without the recursive walk of `nn.Module.train`.
+
+    The modules are collected once and their flag is set in a flat pass (a decoder with LoRA has
+    thousands of modules: 4 ms per switch with `train`, 0.3 ms this way). A module that overrides
+    `train` does more than set the flag, and then the model's own method is used; the one
+    exception is `PreTrainedModel`, whose override only re-installs the hub kernels when
+    `use_kernels` is on.
+    """
+
+    def __init__(self, model: torch.nn.Module):
+        self.model = model
+        self.modules = list(model.modules())
+        overriding = [m for m in self.modules if type(m).train is not torch.nn.Module.train]
+        self.hub_models = [m for m in overriding if isinstance(m, PreTrainedModel)]
+        self.flat = len(self.hub_models) == len(overriding)
+
+    def __call__(self, training: bool) -> None:
+        if not self.flat or any(m.use_kernels for m in self.hub_models):
+            self.model.train(training)
+            return
+        for module in self.modules:
+            module.__dict__["training"] = training  # a plain attribute: skips Module.__setattr__
 
 
 class _Trainer(Trainer):
@@ -51,6 +76,8 @@ class _Trainer(Trainer):
             self.model_accepts_loss_kwargs = False
         self.memory = MemoryMeter()
         self._select_seconds = 0.0
+        self._steps_taken = 0
+        self._modes: dict[int, ModeSwitch] = {}
         self._last_log = None  # (time, global_step) of the previous loss log
         self._timer = StepTimer(self.args.profile_timing)
         if self._timer.enabled:
@@ -86,8 +113,18 @@ class _Trainer(Trainer):
                 f"packed inputs need attn_implementation={attention.NAME}, not {implementation}"
             )
 
+    def set_mode(self, model: torch.nn.Module, training: bool) -> None:
+        """`model.train(training)`, cheaply (`ModeSwitch`)."""
+        if id(model) not in self._modes:
+            self._modes[id(model)] = ModeSwitch(model)
+        self._modes[id(model)](training)
+
     def log(self, logs: dict[str, float], start_time: float | None = None) -> None:
         """Add wall-clock step time, selection time and peak memory to every loss log."""
+        with self._timer.fine("log"):
+            self._log(logs, start_time)
+
+    def _log(self, logs: dict[str, float], start_time: float | None = None) -> None:
         if "loss" in logs:
             now, step = time.perf_counter(), self.state.global_step
             if self._last_log is not None and step > self._last_log[1]:
@@ -160,7 +197,8 @@ class CustomTrainer(_Trainer):
 class CoresetTrainer(_Trainer):
     """CoLM: train on the part of each selection pool that a coreset of the features picks."""
 
-    drop_invalid = False  # drop examples whose feature is empty / NaN / zero before the gather
+    drop_invalid = False  # drop examples whose feature is empty / NaN / zero before the selection
+    skip_unused = False  # do not compute the features that provably cannot change the selection
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -177,7 +215,9 @@ class CoresetTrainer(_Trainer):
             if needs_params
             else []
         )
-        self.extractor = build_extractor(args, self.model, self.zo_params, self.zo_seed)
+        self.extractor = build_extractor(
+            args, self.model, self.zo_params, self.zo_seed, self._timer
+        )
         dims = sum(p.numel() for _, p in self.zo_params) or self.model.config.hidden_size
         if not self.extractor.scalar and args.zo_dim > dims:
             raise ValueError(
@@ -209,10 +249,45 @@ class CoresetTrainer(_Trainer):
             "selected_per_rank": self._per_rank(args.pool_micro_batches),
             "pack_tokens": {
                 "selection": self.batching.select_tokens,
-                "training": self.batching.train_tokens,
+                "training": "memory-derived (second step)"
+                if self.batching.derive_train_tokens
+                else self.batching.train_tokens,
             },
             "attn_implementation": self.model.config._attn_implementation,
         }
+
+    def _derive_train_tokens(self, model) -> None:
+        """Size the training packs by memory: the tokens of one forward + backward that fit."""
+        length = int(self.batching.mean_tokens)
+        vocab = self.model.config.vocab_size
+        rng = np.random.default_rng(0)
+
+        def probe(tokens: int) -> None:
+            examples = []
+            for _ in range(max(1, tokens // length)):
+                ids = rng.integers(vocab, size=length)
+                examples.append(Example(input_ids=ids, labels=ids.copy()))
+            batch = self._prepare_inputs(pack(examples))
+            try:
+                with self.accelerator.no_sync(model):
+                    with self.compute_loss_context_manager():
+                        loss = self.batching.loss(
+                            self,
+                            model,
+                            batch,
+                            torch.ones(len(examples)),
+                            self.batching.total_labels(examples),
+                        )
+                    self.accelerator.backward(loss)
+            finally:  # also after an out-of-memory error
+                loss = None
+                model.zero_grad(set_to_none=True)
+
+        budget = train_token_budget(
+            probe, (2 * length, 6 * length), self.args.train_memory_fraction
+        )
+        logger.info(f"Training packs: {budget} tokens per forward (derived from GPU memory)")
+        self.batching.train_tokens = budget
 
     # ----- budgets and sub-batches (differ between the two coreset trainers) --------------
     def _check_args(self):
@@ -225,6 +300,9 @@ class CoresetTrainer(_Trainer):
     def training_step(self, model, inputs, num_items_in_batch=None):
         if self._last_log is None:
             self._last_log = (time.perf_counter(), self.state.global_step)
+        if self.batching.derive_train_tokens and self._steps_taken == 1:
+            self._derive_train_tokens(model)  # once, with the optimizer state in place
+        self._steps_taken += 1
         start = time.perf_counter()
         self.memory.start()
         with self._timer.section("selection"):
@@ -234,12 +312,14 @@ class CoresetTrainer(_Trainer):
 
         self.memory.start()
         with self._timer.section("train"):
-            model.train()
-            if hasattr(self.optimizer, "train") and callable(self.optimizer.train):
-                self.optimizer.train()  # schedule-free optimizers
+            with self._timer.fine("mode"):
+                self.set_mode(model, True)
+                if hasattr(self.optimizer, "train") and callable(self.optimizer.train):
+                    self.optimizer.train()  # schedule-free optimizers
             done = torch.zeros((), device=self.args.device)
             for i, (batch, weight) in enumerate(sub_batches):
-                batch = self._prepare_inputs(batch)
+                with self._timer.fine("prepare"):
+                    batch = self._prepare_inputs(batch)
                 # One gradient all-reduce per optimizer step: on the last sub-batch only.
                 last = i == len(sub_batches) - 1
                 with contextlib.nullcontext() if last else self.accelerator.no_sync(model):
@@ -253,36 +333,39 @@ class CoresetTrainer(_Trainer):
 
     def _select(self, inputs: dict):
         args, t = self.args, self._timer
-        if self.extractor.mode is not None:
-            self.model.train(self.extractor.mode == "train")
-        with t.section("features"):
-            batches = [self._prepare_inputs(b) for b in self.batching.feature_batches(inputs)]
-            values = torch.cat([self._features(b) for b in batches])
-            examples = self.batching.examples(inputs)
-            if self.drop_invalid:
-                valid = (
-                    values != 0
-                    if values.dim() == 1
-                    else (~torch.isnan(values).any(dim=1) & (torch.norm(values, dim=1) != 0))
-                )
-                examples = [e for e, ok in zip(examples, valid.tolist(), strict=True) if ok]
-                values = values[valid]
-            values = values.cpu()
-        per_rank = self._per_rank(args.pool_micro_batches)
         world, rank = args.world_size, args.process_index
+        budget = self._per_rank(args.pool_micro_batches) * world
+        with t.section("plan"):
+            # The pool of all ranks, and which of its features the selection can use.
+            pool = [e for chunk in all_gather_object(self.batching.examples(inputs)) for e in chunk]
+            sources = [source_of(e) for e in pool]
+            wanted = (
+                self.selector.needed(sources, budget)
+                if self.skip_unused
+                else np.ones(len(pool), bool)
+            )
+            positions = balanced_shares([len(e) for e in pool], wanted, world)[rank]
+            t.count("pool_tokens", sum(len(e) for e in pool))
+            t.count("forward_examples", len(positions))
+            t.count("forward_tokens", sum(len(pool[i]) for i in positions))
+        with t.section("features"):
+            with t.fine("mode"):
+                if self.extractor.mode is not None:
+                    self.set_mode(self.model, self.extractor.mode == "train")
+            with t.fine("pack"):
+                batches = [
+                    self._prepare_inputs(b)
+                    for b in self.batching.feature_batches([pool[i] for i in positions])
+                ]
+            values = torch.cat([self._features(b) for b in batches]) if batches else torch.zeros(0)
+            with t.fine("to_cpu"):
+                values = values.cpu()
         with t.section("gather"):
-            pool = [e for chunk in all_gather_object(examples) for e in chunk]
-            gathered = gather_object(values)
+            gathered = gather_object((positions, values))
         selection = None
         if rank == 0:
             with t.section("select"):
-                feats = torch.cat(gathered).to(args.device)
-                chosen = self.selector(
-                    feats, [source_of(e) for e in pool], per_rank * world, self.state.global_step
-                )
-                if args.save_indices:
-                    self._save_indices(pool, chosen)
-                selection = (chosen.indices, chosen.weights)
+                selection = self._choose(pool, sources, gathered, budget)
         with t.section("scatter"):
             indices, weights = broadcast_object(selection)
         # Round-robin, so that every rank gets the same mixture (the list starts with the examples
@@ -290,12 +373,39 @@ class CoresetTrainer(_Trainer):
         mine = slice(rank, None, world)
         total = self.batching.total_labels([pool[i] for i in indices])
         chosen_examples = [pool[i] for i in indices[mine]]
-        return self.batching.train_batches(chosen_examples, weights[mine]), total
+        sub_batches = self.batching.train_batches(chosen_examples, weights[mine])
+        t.count("train_tokens", sum(len(e) for e in chosen_examples))
+        t.count("train_packs", len(sub_batches))
+        return sub_batches, total
+
+    def _choose(self, pool: list, sources: list[int], gathered: list, total: int):
+        """Rank 0: features of the pool from the ranks' shares, then the selection."""
+        args = self.args
+        first = gathered[0][1]
+        values = first.new_zeros((len(pool), *first.shape[1:]))
+        for positions, part in gathered:
+            values[torch.as_tensor(positions, dtype=torch.long)] = part
+        values = values.to(args.device)
+        rows = torch.arange(len(pool))
+        if self.drop_invalid:
+            valid = (
+                values != 0
+                if values.dim() == 1
+                else (~torch.isnan(values).any(dim=1) & (torch.norm(values, dim=1) != 0))
+            ).cpu()
+            rows = rows[valid]
+            values = values[valid.to(values.device)]
+        feats = self.extractor.expand(values)
+        kept = rows.tolist()
+        chosen = self.selector(feats, [sources[i] for i in kept], total, self.state.global_step)
+        if args.save_indices:
+            self._save_indices([pool[i] for i in kept], chosen)
+        return [kept[i] for i in chosen.indices], chosen.weights
 
     def _features(self, batch: dict) -> torch.Tensor:
         values = self.extractor.extract(batch)
-        if self.extractor.batched:
-            values = values.float()
+        if self.extractor.batched:  # at least float32 (float64 stays: the tests run in double)
+            values = values.to(torch.promote_types(values.dtype, torch.float32))
         return values
 
     def _optimizer_moments(self):
@@ -344,6 +454,8 @@ class SubsetTrainer(CoresetTrainer):
 
 class SubsetTrainerEfficient(CoresetTrainer):
     """Batched last-layer MeZO (the paper's method): several examples per forward."""
+
+    skip_unused = True
 
     def _check_args(self):
         args = self.args

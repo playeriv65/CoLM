@@ -7,7 +7,14 @@ from equivalence.fixtures import model_fp64
 from equivalence.helpers import build, make_args
 
 from colm.selection.features import build_extractor, example_means
-from colm.selection.packing import Example, greedy_groups, label_positions, model_inputs, pack
+from colm.selection.packing import (
+    Example,
+    greedy_groups,
+    label_counts,
+    label_positions,
+    model_inputs,
+    pack,
+)
 from colm.selection.zo import LastLayerSplit
 from colm.train import attention
 
@@ -121,7 +128,7 @@ def test_example_means_are_token_means(tokenizer, model):
     positions, targets, segment = label_positions(batch)
     with torch.no_grad():
         logits = model(**model_inputs(batch), logits_to_keep=positions).logits[0]
-        means = example_means(logits, targets, segment, len(examples))
+        means = example_means(logits, targets, segment, label_counts(batch))
         for k, e in enumerate(examples):
             loss = model(
                 input_ids=torch.tensor(e.input_ids)[None], labels=torch.tensor(e.labels)[None]

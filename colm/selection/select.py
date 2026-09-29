@@ -13,7 +13,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from colm.selection.facility_location import get_orders_and_weights
+from colm.selection.facility_location import class_budgets, get_orders_and_weights
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,51 @@ class CoresetSelector:
 
     def load_state_dict(self, state: dict) -> None:
         self.prev_m, self.prev_v = state["prev_m"], state["prev_v"]
+
+    def needed(self, sources: list[int], total: int) -> np.ndarray:
+        """Which examples' features can change the selection of `total` examples of this pool.
+
+        Decided from the source ids alone, before any feature is computed (the others may be
+        passed as zeros; nothing reads them):
+
+        * examples of `keep_sources` are trained on whatever their feature is;
+        * a source with a zero quota gets no facility-location candidate, and the coordinates are
+          ranked per source, so its rows influence no other source; a source selected in full
+          skips facility location but its rows still enter the Adam moments (`mezo_optim=adam`);
+        * when the kept examples fill the budget no feature is used at all.
+
+        The budgets are a function of the source ids for `proportional` selection only; the random
+        tie-breaks of `balanced`, the sampled coordinates of `mezo_topk=sampling` (their draws
+        depend on the features), a global coordinate ranking (`source_wise_selection=none`) and the
+        transforms that normalise over the pool need every candidate.
+        """
+        args = self.args
+        sources = np.asarray(sources)
+        keep = np.isin(sources, args.keep_source_ids)
+        candidates = ~keep
+        budget = total - int(keep.sum())
+        if budget <= 0:
+            return np.zeros(len(sources), dtype=bool)
+        if (
+            args.source_wise_selection != "proportional"
+            or args.mezo_topk == "sampling"
+            or args.mezo_transform != "none"
+        ):
+            return candidates
+        labels, classes, quotas = class_budgets(
+            budget,
+            int(candidates.sum()),
+            sources[candidates],
+            args.num_per_class_start,
+            "proportional",
+        )
+        sizes = np.bincount(labels, minlength=len(classes))
+        used = quotas > 0
+        if args.mezo_optim != "adam":
+            used &= quotas < sizes
+        needed = np.zeros(len(sources), dtype=bool)
+        needed[candidates] = used[labels]
+        return needed
 
     def __call__(self, feats: torch.Tensor, sources: list[int], total: int, step: int) -> Selection:
         args = self.args
@@ -110,9 +155,9 @@ class CoresetSelector:
 
     # ----- stages -------------------------------------------------------------------------
     def _transform(self, feats):
-        if feats.dtype == torch.long:
-            return feats
         args = self.args
+        if feats.dtype == torch.long or args.mezo_transform == "none":
+            return feats
         mean_norm = torch.norm(torch.mean(feats, dim=0), p=2)
         if args.mezo_transform == "self_normalize":
             feats = feats / torch.norm(feats, p=2, dim=1, keepdim=True)

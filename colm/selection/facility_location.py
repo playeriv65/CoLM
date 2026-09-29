@@ -62,21 +62,32 @@ def _budgets(budget: int, y: np.ndarray, classes: np.ndarray, start: str, strate
     raise ValueError(f"unknown strategy: {strategy}")
 
 
+def class_budgets(B: int, n: int, y, per_class_start: str, strategy: str):
+    """`(labels, classes, counts)`: the class (0..C-1) of each of the `n` points and the number
+    of points to select from every class, `B` in total.
+
+    Without random numbers for `proportional` and `none`: the budgets are a function of the class
+    labels alone, so they are known before any feature exists.
+    """
+    if y is None:
+        if strategy != "none":
+            raise ValueError(f"strategy {strategy!r} needs class labels")
+        y = np.zeros(n, dtype=np.int32)
+    else:
+        y = np.unique(np.asarray(y), return_inverse=True)[1]
+    classes = np.unique(y)
+    counts = _budgets(B, y, classes, per_class_start, strategy)
+    assert counts.sum() == B
+    return y, classes, counts
+
+
 def get_orders_and_weights(B, X, metric, y=None, per_class_start="floor", strategy="proportional"):
     """Select `B` of the rows of X by facility location, `B_c` from each class of `y`.
 
     Returns `(order, weights)`: indices into X (classes concatenated, greedy order inside a class)
     and the size of the cluster each selected example represents.
     """
-    if y is None:
-        if strategy != "none":
-            raise ValueError(f"strategy {strategy!r} needs class labels")
-        y = np.zeros(len(X), dtype=np.int32)
-    else:
-        y = np.unique(np.asarray(y), return_inverse=True)[1]
-    classes = np.unique(y)
-    counts = _budgets(B, y, classes, per_class_start, strategy)
-    assert counts.sum() == B
+    y, classes, counts = class_budgets(B, len(X), y, per_class_start, strategy)
 
     order, weights = [], []
     for c in classes:

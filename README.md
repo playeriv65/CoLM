@@ -82,13 +82,19 @@ before  configs/math_phi2_efficient.json    {"model_name_or_path": "microsoft/ph
 after   configs/math_phi2_efficient.json    {"model_name_or_path": "microsoft/phi-2"}      colm-train configs/math_phi2_efficient.json --gpus 2,3
 ```
 
-**What a step does** (`colm/train/trainers.py`, `colm/selection/`): the selection pool of a rank (all
-examples of one optimizer step, packed without padding) goes through the extractor of
-`data_selection_unit` (default: the batched last-layer MeZO estimate), the features of all ranks
-are gathered on rank 0, facility location picks `small_batch_ratio` of the pool source by source,
-the picks are broadcast and every rank trains on its share. The loss of a step is the mean over
-all label tokens of the examples trained in the step (all ranks). Peak GPU memory is measured on every
-rank and per phase (`memory.json`, `peak_mem_*` in the log).
+**What a step does** (`colm/train/trainers.py`, `colm/selection/`): the pool of all ranks (one HF
+batch per rank, packed without padding) is gathered on every rank and `CoresetSelector.needed`
+decides from the source ids which features can influence the selection: examples of `keep_sources`
+and of sources with a zero quota are not forwarded at all (about 25% of the pool with the paper
+recipe). The rest is shared over the ranks by token count and goes through the extractor of
+`data_selection_unit` (default: the batched last-layer MeZO estimate); for it a feature is `g_i z`
+with one fixed direction z, so each rank sends one scalar per example and rank 0 builds the
+features. Facility location picks `small_batch_ratio` of the pool source by source, the picks are
+broadcast and every rank trains on its share, in as few packed forwards as GPU memory allows
+(`train_memory_fraction`, the token budget is measured on the second step). The loss of a step is
+the mean over all label tokens of the examples trained in the step (all ranks) whatever the
+grouping. Peak GPU memory is measured on every rank and per phase (`memory.json`, `peak_mem_*` in
+the log).
 
 **Known errors of the upstream code** are fixed (`docs/errors.md`, with the evidence). The
 alignment with the upstream behaviour was proven with a temporary `legacy` switch (float64 CPU

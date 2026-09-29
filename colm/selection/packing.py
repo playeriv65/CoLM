@@ -46,6 +46,11 @@ def pack(examples: list[Example]) -> dict:
     total = int(cu[-1])
     starts = cu[:-1].long()
     position_ids = torch.arange(total) - torch.repeat_interleave(starts, lengths)
+    # Where the row predicts a label: computed here on the CPU, so that the losses need no
+    # device-to-host synchronisation (`nonzero`, `bincount`) to find them.
+    targets = torch.cat([labels[1:], labels.new_full((1,), IGNORE_INDEX)])
+    positions = (targets != IGNORE_INDEX).nonzero(as_tuple=True)[0]
+    segment = torch.bucketize(positions, cu[1:].long(), right=True)
     return {
         "input_ids": torch.from_numpy(np.concatenate([e.input_ids for e in examples]))[None],
         "position_ids": position_ids[None],
@@ -58,6 +63,10 @@ def pack(examples: list[Example]) -> dict:
             "sources": torch.tensor([e.source for e in examples]),
             "indices": torch.tensor([e.index for e in examples]),
             "completion_lengths": torch.tensor([e.completion_length for e in examples]),
+            "label_positions": positions,
+            "label_targets": targets[positions],
+            "label_segment": segment,
+            "label_counts": torch.bincount(segment, minlength=len(examples)),
         },
     }
 
@@ -77,11 +86,13 @@ def model_inputs(batch: dict) -> dict:
 
 def label_positions(batch: dict):
     """(positions, targets, segment): where the row predicts a label, what, and for which example."""
-    labels = batch["labels"][0]
-    targets = torch.cat([labels[1:], labels.new_full((1,), IGNORE_INDEX)])
-    positions = (targets != IGNORE_INDEX).nonzero(as_tuple=True)[0]
-    segment = torch.bucketize(positions, batch["cu_seq_lens_q"][1:].long(), right=True)
-    return positions, targets[positions], segment
+    meta = batch[META]
+    return meta["label_positions"], meta["label_targets"], meta["label_segment"]
+
+
+def label_counts(batch: dict) -> torch.Tensor:
+    """Label tokens of every example of the row."""
+    return batch[META]["label_counts"]
 
 
 def greedy_groups(lengths: list[int], budget: int) -> list[list[int]]:
@@ -96,3 +107,18 @@ def greedy_groups(lengths: list[int], budget: int) -> list[list[int]]:
     if current:
         groups.append(current)
     return groups
+
+
+def balanced_shares(lengths: list[int], wanted: np.ndarray, parts: int) -> list[list[int]]:
+    """Split the `wanted` items over `parts` workers with (nearly) equal token counts.
+
+    Longest first, each to the least loaded worker (ties: the lowest rank); every worker's items
+    keep their original order. Deterministic, so all ranks compute the same split.
+    """
+    loads = [0] * parts
+    shares: list[list[int]] = [[] for _ in range(parts)]
+    for i in sorted(np.flatnonzero(wanted).tolist(), key=lambda i: (-lengths[i], i)):
+        worker = loads.index(min(loads))
+        shares[worker].append(i)
+        loads[worker] += lengths[i]
+    return [sorted(share) for share in shares]

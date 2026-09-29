@@ -61,6 +61,20 @@ fp16 attention: the fp32 packed selection forward equals the stock sdpa forward 
 packed forward differs from the fp16 stock forward by 0.9% (a precision-class difference:
 fp16 vs fp32 differs by 1.3%). Gradient error of the fp16 recipe against fp32 sdpa (eval mode,
 4 examples): stock fp16 sdpa 1.13 relative (cosine 0.66), packed `varlen_attn` 0.71 (cosine 0.75).
+Correction of the reference (2026-09-28, phi-2 + LoRA r=128, 16 real examples, GPU 0): the fp32
+**memory-efficient SDPA backward is not a valid reference on sm_120.** Against the fp64 gradient
+(exact MATH attention, packs of one example) fp32 MATH is 6.7e-4 off and fp32 EFFICIENT 0.31 off
+(cosine 0.97); the fp32 EFFICIENT gradient also depends on the packing (0.30 between one pack of 8
+examples and packs of one; MATH: 7.7e-4). The kernel is accurate on random q, k, v (7e-7 against
+fp64 for head dim 64-128, length up to 512), so the error comes with the real activations of the
+model; the forward is not affected (loss 1e-6, MeZO g_i within 1e-3 of the exact directional
+derivative). Every fp32 gradient comparison therefore uses `sdpa_kernel(MATH)`. Against that
+reference the fp16 training gradients are (relative error, cosine): stock fp16 sdpa, one example
+per forward 1.17 (0.65); `colm_varlen` (torch `varlen_attn`, flash), one pack of 16 examples 0.44
+(0.90), one example per forward 0.41 (0.94). The earlier numbers above (1.13 and 0.71) used the
+EFFICIENT fp32 gradient as reference. The fp16 gradient error remains the pending precision
+decision, not a packing effect.
+
 Bug found on the way: under autocast the rotary embedding leaves q and k in fp32 and v in fp16;
 the packed kernels read garbage (NaN, illegal memory access) until q, k and v were cast to the
 autocast dtype.

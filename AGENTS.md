@@ -29,21 +29,27 @@ are no other launch scripts: do not add shell wrappers, extend the entry points.
   `SubsetTrainerEfficient` (batched last-layer MeZO, the paper's method). The selection pool of a
   step (`per_device_train_batch_size x gradient_accumulation_steps` examples) is ONE HF batch
   (`TrainingArguments` sets HF's gradient accumulation to 1); the coreset trainers override only
-  `training_step` (documented extension point): features -> gather -> rank-0 selection ->
-  broadcast -> forward/backward of the selected sub-batches with `accelerator.no_sync` for all
-  but the last. Optimizer step, clipping, scheduler, logging, checkpointing are stock. Do not
+  `training_step` (documented extension point): plan (gather the pool, which features are needed)
+  -> features of the needed examples (a token-balanced share per rank) -> gather (scalars g_i for
+  MeZO) -> rank-0 selection -> broadcast -> forward/backward of the selected examples in packs of
+  `batching.train_tokens` (one pack unless memory says otherwise; `accelerator.no_sync` for all
+  but the last). Optimizer step, clipping, scheduler, logging, checkpointing are stock. Do not
   copy HF loop internals back in or touch private HF attributes.
-- `colm/selection/` — `features.py` (one extractor per `data_selection_unit`, on packed batches),
+- `colm/selection/` — `features.py` (one extractor per `data_selection_unit`, on packed batches;
+  `extract` -> per-example values, `expand` -> features; the MeZO extractor returns g_i),
   `zo.py` (`Perturbation`: fixed-seed z, out-of-place +-eps through `functional_call`;
   `LastLayerSplit`: the model's own forward stopped by a pre-hook on the last layer, then the
-  last layer replayed; works for any decoder), `select.py` (`CoresetSelector`: keep sources,
-  transform, Adam, coordinate mask, facility location; keeps the Adam moments),
-  `facility_location.py`, `packing.py` (padding-free batches), `batching.py` (packed batching, the
-  step loss), `pool.py` (collectives that are no-ops in one process).
+  last layer replayed; works for any decoder), `select.py` (`CoresetSelector`: `needed` = which
+  features can matter, keep sources, transform, Adam, coordinate mask, facility location; keeps
+  the Adam moments), `facility_location.py` (`class_budgets` = the per-source quotas),
+  `packing.py` (padding-free batches with the label geometry computed on the CPU, `balanced_shares`),
+  `batching.py` (packed batching, the step loss), `pool.py` (collectives that are no-ops in one
+  process).
 - `colm/train/attention.py` — `colm_varlen` attention for packed rows (registered with
   `AttentionInterface`; the default `attn_implementation`). `colm/train/memory.py` — peak memory
-  of every rank per phase. `colm/train/step_timing.py` — opt-in per-phase step timer and its
-  summariser (`--profile_timing coarse|fine`; keep new timing sections behind `timer.section`).
+  of every rank per phase, and the memory-derived training token budget (`train_token_budget`).
+  `colm/train/step_timing.py` — opt-in per-phase step timer and its summariser
+  (`--profile_timing coarse|fine`; keep new timing sections behind `timer.section`).
 - `colm/train/config.py` (JSON + flags, model recipe from `configs/model_profiles.json`, resolved
   config), `training_arguments.py` / `model_arguments.py` / `data_arguments.py` — all options; the
   defaults are the paper recipe with the corrections of `docs/errors.md`.
@@ -75,5 +81,13 @@ are no other launch scripts: do not add shell wrappers, extend the entry points.
 
 ## Optimisation work
 
-- Stopped for now. Backlog and findings: `docs/optimization-backlog.md` (numbers there refer to
-  the padded upstream path); the unfinished exact-optimisation branch is `task/exact-opts`.
+- The execution-only optimisations are done and are the code path (no switches): backlog, measured
+  tables and the candidates left (O11-O13) are in `docs/optimization-backlog.md`. Keep them exact:
+  `tests/test_opt.py` compares every one with the plain computation in float64 on CPU,
+  `scripts/check_opt.py` does the phi-2 teacher-forced comparison on a GPU (selection overlap
+  against the fp32 noise floor, gradients against an exact fp32 reference).
+- fp32 gradient references use `sdpa_kernel(SDPBackend.MATH)`: the fp32 memory-efficient SDPA
+  backward is ~0.3 off on phi-2 on this GPU (`docs/errors.md`).
+- Timing follows the protocol in the backlog (`--profile_timing fine`, 130 steps, 10 warm-up,
+  closure, GPU alone, loadavg recorded); a step's time is 0.154 ms per forwarded token + 0.130 ms
+  per trained token, so compare runs on the same pools.

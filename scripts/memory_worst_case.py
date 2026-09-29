@@ -42,7 +42,7 @@ def main():
     model_args, data_args, training_args, _ = parse_args(
         [cli.config, "--output_dir", cli.output_dir, "--report_to", "none", *rest]
     )
-    length = cli.length or sequence_limit(model_args, data_args, training_args.legacy)
+    length = cli.length or sequence_limit(model_args, data_args)
     tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
     add_padding_to_tokenizer(tokenizer)
     model = build_model(model_args, training_args, tokenizer)
@@ -68,9 +68,7 @@ def main():
     trainer.model.train()
     trainer.memory.start()
     with torch.autocast("cuda", dtype=torch.float16 if training_args.fp16 else torch.bfloat16):
-        loss = trainer.batching.loss(
-            trainer, trainer.model, train_pack, torch.ones(train_micro), 1, 1
-        )
+        loss = trainer.batching.loss(trainer, trainer.model, train_pack, torch.ones(train_micro), 1)
     loss.backward()
     trainer.memory.stop("train")
     print(

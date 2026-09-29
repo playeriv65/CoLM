@@ -107,8 +107,9 @@ def test_subset_trainer_units(tmp_path, tokenizer, mixture_file, monkeypatch, un
     )
     for step in range(MAX_STEPS):
         step_batches = [t for t in trained if t[0] == step]
-        assert len(step_batches) == int(gas * ratio) and all(len(t[1]) == 1 for t in step_batches)
-        assert all(float(w) > 0 for _, _, w in step_batches)
+        # The selected examples are packed together (one weight each), not one per forward.
+        assert sum(len(t[1]) for t in step_batches) == int(gas * ratio)
+        assert all(float(w) > 0 for _, _, weights in step_batches for w in weights)
 
 
 def test_custom_trainer_full_batch(tmp_path, tokenizer, mixture_file):
@@ -142,7 +143,11 @@ def _extract(tmp_path, tokenizer, mixture_file):
     trainer, model = build(args, tokenizer, mixture_file)
     inputs = next(iter(trainer.get_train_dataloader()))
     model.eval()
-    return trainer, model, trainer._prepare_inputs(trainer.batching.feature_batches(inputs)[0])
+    return (
+        trainer,
+        model,
+        trainer._prepare_inputs(trainer.batching.feature_batches(inputs["examples"])[0]),
+    )
 
 
 def test_estimate_and_the_two_rng_streams(tmp_path, tokenizer, mixture_file):
