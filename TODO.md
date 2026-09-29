@@ -17,14 +17,15 @@ commit / result pointer, delete them once they are recorded in docs. Optimisatio
       The queue was regenerated against the fixed code (`queues/rank-sweep-v2`, outputs in
       `out/rank-sweep-v2`); the pre-refactor queue `queues/rank-sweep` and `out/rank-sweep` (old
       tokenisation, holdout and scoring) must not be reused (deletion pending confirmation). The GPU is assigned by the user.
-- [ ] Precision decisions with evidence in `docs/errors.md` (fp16 attention gradients; fp32
-      selection forward must stay), not switched without a decision.
+- [ ] Training attention gradient precision remains a separate decision
+      (`docs/errors.md`). The Phi-2 selection prefix uses fp16 while the
+      perturbed final layer and loss remain fp32 (`docs/fp16-prefix.md`).
 - [ ] Make evaluation report loss as well as accuracy in `math_eval` (accuracy only today).
-- [ ] Optimisation, open candidates (`docs/optimization-backlog.md`): O12 LoRA merged into the fp32
-      selection forward (est. -150 ms of 1305), O13 fp32 GEMMs in the NN layout (est. -130 ms), O11
-      final layer at label positions (est. -20 ms), the base weights stored once (fp32 +
-      per-forward fp16 copies today). All are precision-neutral but O12/O13 need extra memory or a
-      custom linear: not started.
+- [ ] Optimisation: profile the new fp16-prefix step for launch overhead and
+      the training forward/backward before choosing another kernel change.
+      The old O12/O13 savings were measured on an fp32 prefix and no longer
+      predict this path; O11 remains an optional ~20 ms architecture-specific
+      change (`docs/optimization-backlog.md`).
 
 ## Experiments
 

@@ -25,7 +25,7 @@ def _parse(tmp_path, *flags, config=None):
     return parse_args([*argv, "--model_name_or_path", "microsoft/phi-2", *flags])
 
 
-def test_a_plain_run_is_the_paper_recipe(tmp_path):
+def test_a_plain_run_uses_the_paper_training_recipe_and_profiled_selection(tmp_path):
     model, data, training, _ = _parse(tmp_path)
     assert data.train_files == ["data/MathInstruct.jsonl"]
     assert (training.max_steps, training.learning_rate, training.warmup_steps) == (1024, 2e-5, 0.03)
@@ -38,6 +38,7 @@ def test_a_plain_run_is_the_paper_recipe(tmp_path):
     # the recipe of phi: fp16 AMP over fp32 weights, LoRA on q k v fc1 fc2
     assert training.fp16 and model.torch_dtype == "none"
     assert training.selection_prefix_dtype == "float16"
+    assert training.pack_tokens == 1536
     assert model.lora_target_modules == ["q_proj", "k_proj", "v_proj", "fc1", "fc2"]
     assert (model.lora_r, model.lora_alpha) == (128, 512)
     # flash varlen for the fp16 training forward, sdpa (fp32-capable) for the selection forward
@@ -71,6 +72,15 @@ def test_selection_prefix_precision_uses_profile_then_explicit_override(tmp_path
             config={"selection_prefix_dtype": "float32"},
         )[2].selection_prefix_dtype
         == "float16"
+    )
+
+
+def test_selection_pack_budget_uses_profile_then_explicit_override(tmp_path):
+    assert _parse(tmp_path)[2].pack_tokens == 1536
+    assert _parse(tmp_path, config={"pack_tokens": 0})[2].pack_tokens == 0
+    assert _parse(tmp_path, "--pack_tokens", "1024")[2].pack_tokens == 1024
+    assert (
+        _parse(tmp_path, "--pack_tokens", "1024", config={"pack_tokens": 0})[2].pack_tokens == 1024
     )
 
 

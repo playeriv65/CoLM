@@ -86,8 +86,9 @@ class TrainingArguments(HFTrainingArguments):
         default=0,
         metadata={
             "help": "Tokens per packed selection forward (a forward always holds at least one "
-            "example). 0: the tokens of one micro-batch of the padded recipe (micro batch size x "
-            "mean example length of the data)."
+            "example). The model profile sets the CLI default (Phi-2: 1536); an explicit flag "
+            "or JSON value overrides it. 0: the tokens of one micro-batch of the padded recipe "
+            "(micro batch size x mean example length of the data)."
         },
     )
     selection_attn_implementation: str = field(

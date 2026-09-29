@@ -38,6 +38,31 @@ by up to 2e-5.
 These checks establish a selection change at this checkpoint; they do not
 establish a learning-quality loss. No learning-curve comparison has been run.
 
+### Fixed-seed rerun
+
+On 2026-09-29, the same checkpoint, pools, packed order, epsilon, and seeds
+were run again on GPU 2. Against the first run, the 24 loss differences changed
+by relative L2 **0.0079%** (FP32 prefix) and **0.0082%** (FP16 prefix); the
+largest absolute changes were 1.2e-7 and 2.4e-7. The FP16-vs-FP32 difference
+remained **12.34%**. For the three fixed direction seeds 734221–734223, the
+per-direction relative L2 differences were 11.31%, 13.47%, and 11.67%.
+The full comparison has correlation 0.993. Its two sign changes occur at FP32
+loss differences of only 1.0e-5 and 1.8e-5, while the median absolute FP32
+loss difference is 3.2e-4.
+
+With the same selection seed and six pools, the two FP32 runs selected a mean
+of **14.67/16** common examples per pool. The two FP16-prefix runs selected
+**14.83/16** in common. The FP16-prefix vs FP32 overlap was **13.0/16** in the
+first run and **13.33/16** in the rerun. Thus a fixed seed makes the ZO
+direction and pool repeatable but does not make floating-point execution or
+near-tied facility-location choices bitwise repeatable. Changing the seed is
+not a correction for the systematic precision difference. This experiment
+does not isolate whether the remaining tiny same-precision variation arises
+in the model kernels, the selector's tie handling, or both.
+
+The rerun's raw JSON and logs are under
+`$COLM_ARTIFACT_ROOT/artifacts/CoLM/seed-recheck-20260929-131110/`.
+
 ## One full-step timing run
 
 Physical GPU 2, one rank; `configs/timing_phi2_efficient.json` with
@@ -89,3 +114,32 @@ The user chose this precision split for the Phi-2 recipe. Selection differs
 beyond the FP32 packing noise, which is disclosed above. The result demonstrates
 stable execution and a speed gain, not equal
 learning quality. A paired learning-curve comparison remains the next check.
+
+## Selection pack budget after the FP16 prefix
+
+One 130-step run on GPU 2 set `pack_tokens=1536`, while keeping
+`train_max_tokens=1536`. The previous run used the data-derived selection
+budget of 1003 tokens. Both used seed 0, the same 120 measured pool token
+counts and the same mean 5,863 forwarded selection tokens per step. The new
+run was on `efa5d63` (the earlier run on `f77f6c3`); the intervening commit
+removed over-context examples from the dataset. Measured steps 11–130:
+
+| Phase | Selection budget 1003 | Selection budget 1536 |
+|---|---:|---:|
+| Full step, ms | 1011.36 | 885.28 |
+| Selection, ms | 508.56 | 413.12 |
+| Selection packing, ms | 62.53 | 14.47 |
+| Selection prefix, ms | 304.97 | 285.84 |
+| Selection suffix, ms | 101.37 | 96.84 |
+| Training, ms | 481.87 | 454.72 |
+| Peak allocated / reserved, GB | 32.297 / 41.730 | 32.289 / 41.725 |
+
+The 50-step window deviation from each run's overall mean was at most 4.15%
+and 4.63% respectively. The timing sections closed to about 1% of step wall
+time. The machine load differed substantially between runs; even training,
+whose pack budget was unchanged, became 27 ms faster. Therefore 126 ms is
+the observed cross-run difference, not a causal estimate of the pack setting
+alone. The larger budget ran without an OOM or an increase in the training
+memory peak. The Phi-2 profile now uses 1536; `--pack_tokens 0` restores the
+data-derived budget. Raw config, step JSONL, memory, and logs are under
+`$COLM_ARTIFACT_ROOT/artifacts/CoLM/fp16-select-pack1536-20260929/`.

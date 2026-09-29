@@ -34,7 +34,8 @@ feature `g_i z`: after the Adam transform facility location is a 1-D k-medoids o
 selection changes with fp32 reordering (20-step teacher-forced runs of the upstream code agree with
 themselves in 3 of 20 steps, mean overlap 13.5 of 16). The scalar `g_i` itself is accurate: on
 phi-2, fp32 with eps 1e-3 is within 1e-3 (median) of the exact directional derivative, fp16
-suffix forwards are noise (errors 0.05 to 12) - the selection forward must stay fp32.
+suffix forwards are noise (errors 0.05 to 12). The perturbed final layer and loss stay fp32;
+the unperturbed prefix now uses fp16 in the Phi-2 profile (`docs/fp16-prefix.md`).
 The audit's E6 (weights of `weightedsubmodlib`) was a misreading: kept examples are scaled by the
 ratio too, the total is consistent.
 

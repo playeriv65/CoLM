@@ -13,6 +13,17 @@ Goal: make a CoLM training step faster **without changing the mini-batch selecti
 The profiles and timing tables through the stock-attention section below describe
 the FP32-prefix baseline. The later FP16-prefix default and its measured
 selection change are documented in `docs/fp16-prefix.md`.
+The Phi-2 profile now also sets `pack_tokens=1536` for selection. Its one-run
+comparison against the previous 1003-token budget is in that document. The
+FP32-prefix O12/O13 speed estimates below do not transfer to the current
+FP16-prefix path. A short profiler diagnostic of two 831-token FP16 prefix
+forwards found 82.6 ms of summed CUDA kernel time, including about 5.2 ms
+in LoRA-shaped `aten::mm` operations and 8.98 ms in the SDPA attention kernel.
+This is profiler evidence, not an unprofiled step-time estimate. The next
+optimization should target the measured current bottleneck after profiling
+the full step; O13 specifically targets obsolete FP32 GEMMs. The profiler
+script and output are under
+`$COLM_ARTIFACT_ROOT/artifacts/CoLM/fp16-prefix-profile-20260929-1318/`.
 Every item states whether it is bitwise-exact, mathematically exact (float rounding only), or a
 semantic change that needs an explicit decision. Measure before and after each item with the
 `profile_timing` breakdown (one run, ≥120 steps, drop 10 warmup, closure against step wall clock).

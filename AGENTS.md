@@ -94,6 +94,10 @@ are no other launch scripts: do not add shell wrappers, extend the entry points.
   the fp32 packing noise (`docs/fp16-prefix.md`); learning quality has not yet
   been compared. Packed inputs need `use_cache=False` (a cache ends the
   packed-batch detection of transformers).
+- The Phi-2 profile sets `pack_tokens=1536` for selection. This is distinct
+  from `train_max_tokens=1536`; JSON or CLI values override either budget.
+  `--pack_tokens 0` restores the data-derived selection budget. The one-run
+  timing comparison and its machine-load caveat are in `docs/fp16-prefix.md`.
 
 ## Optimisation work
 

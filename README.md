@@ -37,8 +37,10 @@ precision pass `--attn_implementation sdpa`.
 
 With the Phi-2 recipe, selection now runs the unperturbed decoder prefix under
 FP16 autocast and keeps the perturbed last layer and loss in FP32. The
-Phi-2's model profile sets `selection_prefix_dtype=float16` and requires FP32
+Phi-2 model profile sets `selection_prefix_dtype=float16` and requires FP32
 model weights; pass `--selection_prefix_dtype float32` to retain the old prefix.
+It also sets `pack_tokens=1536` for selection; `--pack_tokens 0` restores the
+data-derived budget (about 1003 tokens on MathInstruct).
 This is faster but changes
 selected examples beyond the measured FP32 packing noise. Learning quality has
 not yet been compared; see [`docs/fp16-prefix.md`](docs/fp16-prefix.md).
