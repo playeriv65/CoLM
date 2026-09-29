@@ -83,7 +83,8 @@ Per rank: 32 examples forwarded for selection, 16 trained (8 micro-batches of 2)
 
 - D1: keep F2 divisor (current) or normalise by valid tokens (changes selection).
 - D2: selection forward precision: keep fp32 (upstream) or fp16 autocast like training (enables
-  flash varlen and O9).
+  flash varlen and O9). A short diagnostic of the loss-difference signal when more LoRA layers
+  are perturbed is in `docs/layer-signal.md`; it does not validate fp16 selection.
 - D3: accept `enable_dropout=False` (no LoRA / residual dropout) to make O9 exact.
 - D4: whether O10 is acceptable.
 
