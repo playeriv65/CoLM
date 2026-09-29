@@ -1,4 +1,3 @@
-import contextlib
 import logging
 import os
 import random
@@ -21,17 +20,6 @@ IGNORE_INDEX = -100
 logger = logging.getLogger(__name__)
 
 
-@contextlib.contextmanager
-def temp_seed(seed):
-    state = np.random.get_state()
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    try:
-        yield
-    finally:
-        np.random.set_state(state)
-
-
 def get_training_dataset(
     train_files: list[str],
     tokenizer,
@@ -41,6 +29,7 @@ def get_training_dataset(
     template_variation=False,
     seed=0,
     hf_datasets_cache_dir=None,
+    subset_selection="use_small_sources",
 ):
     """Training data of the files. `max_seq_length`: examples that do not fit are dropped, never cut."""
     raw_datasets = load_raw_dataset(
@@ -49,6 +38,7 @@ def get_training_dataset(
         subset_index_files=subset_index_files,
         seed=seed,
         cache_dir=hf_datasets_cache_dir,
+        subset_selection=subset_selection,
     )
 
     if "instruction" in raw_datasets.column_names:
@@ -73,14 +63,15 @@ def load_raw_dataset(
     subset_index_files=None,
     seed=0,
     cache_dir=None,
+    subset_selection="use_small_sources",
 ):
-    """load raw dataset"""
+    """The raw rows of the files, or a subset of `sample_percentage` of them chosen by `subset_selection`."""
     if isinstance(train_files, str):
         train_files = [train_files]
     if len(train_files) == 1 and not train_files[0].endswith(".jsonl"):
         processed_datasets = load_dataset(train_files[0], cache_dir=cache_dir)["train"]
         if (subset_index_files is not None) and (len(subset_index_files) == 1):
-            subset_indices = torch.load(subset_index_files[0])
+            subset_indices = torch.load(subset_index_files[0], weights_only=True)
             processed_datasets = processed_datasets.select(subset_indices)
     else:
         processed_datasets = load_dataset(
@@ -88,10 +79,8 @@ def load_raw_dataset(
             data_files=train_files,
         )["train"]
         if (subset_index_files is not None) and (len(subset_index_files) == 1):
-            subset_indices = torch.load(subset_index_files[0])
+            subset_indices = torch.load(subset_index_files[0], weights_only=True)
             processed_datasets = processed_datasets.select(subset_indices)
-
-    print(f"Before selection, keys are {processed_datasets[0].keys()}")
 
     if sample_size is None:
         sample_size = int(len(processed_datasets) * sample_percentage)
@@ -99,9 +88,8 @@ def load_raw_dataset(
     if sample_size == len(processed_datasets):
         return processed_datasets  # not shuffle
 
-    subset_selection = "use_small_sources"
     if subset_selection == "random":
-        with temp_seed(seed):
+        with utils.temp_seed(seed):
             index = np.random.permutation(len(processed_datasets))[:sample_size]
 
         sampled_dataset = processed_datasets.select(index)
@@ -136,7 +124,7 @@ def load_raw_dataset(
             selected_indices.extend(all_remaining[:remaining])
 
         # Shuffle the selected indices
-        with temp_seed(seed):
+        with utils.temp_seed(seed):
             np.random.shuffle(selected_indices)
 
         sampled_dataset = processed_datasets.select(selected_indices)
@@ -160,11 +148,11 @@ def load_raw_dataset(
             )
 
         # Shuffle the selected indices
-        with temp_seed(seed):
+        with utils.temp_seed(seed):
             np.random.shuffle(selected_indices)
 
         sampled_dataset = processed_datasets.select(selected_indices)
-        print(f"Sampled dataset is len {len(sampled_dataset)}, sample size was {sample_size}")
+        logger.info(f"Sampled dataset is len {len(sampled_dataset)}, sample size was {sample_size}")
         assert abs(len(sampled_dataset) - sample_size) <= 10
     elif subset_selection == "longest_selection":
         example_indices_and_lengths = [
@@ -174,7 +162,7 @@ def load_raw_dataset(
         selected_indices = [idx for idx, _ in example_indices_and_lengths[:sample_size]]
 
         # Shuffle the selected indices
-        with temp_seed(seed):
+        with utils.temp_seed(seed):
             np.random.shuffle(selected_indices)
 
         sampled_dataset = processed_datasets.select(selected_indices)
@@ -211,11 +199,11 @@ def load_raw_dataset(
             selected_indices.extend(group_selected_indices)
 
         # Shuffle selected indices
-        with temp_seed(seed):
+        with utils.temp_seed(seed):
             np.random.shuffle(selected_indices)
 
         sampled_dataset = processed_datasets.select(selected_indices)
-        print(
+        logger.info(
             f"Using small sources fully and {int(large_source_percentage * 100)}% of large sources"
         )
         assert abs(len(sampled_dataset) - sample_size) <= 5
@@ -236,7 +224,7 @@ def encode_data(
     if "input_ids" in raw_datasets.features:
         return raw_datasets
     encode_function = get_encode_function(raw_datasets, tokenizer, max_seq_length, func_name)
-    print(f"USING ENCODE FUNCTION {encode_function}")
+    logger.info(f"Encode function: {encode_function}")
     # To speed up this part, we use multiprocessing.
     lm_datasets = raw_datasets.map(
         encode_function,
@@ -629,7 +617,6 @@ def encode_with_messages_format_with_llama2_chat(example, tokenizer, max_seq_len
         return formatted_text
 
     example_text = _concat_messages(messages).strip()
-    print(example_text)
     tokenized_example = tokenizer(
         example_text, return_tensors="pt", max_length=max_seq_length, truncation=True
     )

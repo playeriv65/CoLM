@@ -156,6 +156,7 @@ def build_data(model_args, data_args, training_args, eval_args, tokenizer, limit
         subset_index_files=data_args.subset_index_files,
         seed=data_args.sample_data_seed,
         hf_datasets_cache_dir=data_args.hf_datasets_cache_dir,
+        subset_selection=data_args.subset_selection,
     )
     heldout = None
     if eval_args.holdout_size:

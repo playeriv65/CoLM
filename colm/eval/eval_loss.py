@@ -312,6 +312,7 @@ def main(argv=None):
             subset_index_files=data_args.subset_index_files,
             seed=data_args.sample_data_seed,
             hf_datasets_cache_dir=data_args.hf_datasets_cache_dir,
+            subset_selection=data_args.subset_selection,
         )
         _, heldout = split_holdout(full, eval_args.holdout_size, eval_args.holdout_seed)
     sets = build_eval_sets(eval_args, tokenizer, heldout, limit=args.limit, max_length=limit)

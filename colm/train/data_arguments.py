@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Literal
 
 import torch
 
@@ -19,6 +20,16 @@ class DataArguments:
             "help": "Optional cap on prompt + completion tokens (default: the model's context "
             "window). Examples above it are dropped, never truncated."
         },
+    )
+    subset_selection: Literal[
+        "random",
+        "balanced_longest_selection",
+        "longest_sourcewise_selection",
+        "longest_selection",
+        "use_small_sources",
+    ] = field(
+        default="use_small_sources",
+        metadata={"help": "How the `percentage` of the data is chosen (unused at percentage 1)."},
     )
     sample_data_seed: int = field(default=42, metadata={"help": "Seed used for data sampling."})
     percentage: float = field(default=1.0, metadata={"help": "Sampling percentage of the data."})
