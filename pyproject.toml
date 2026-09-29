@@ -17,6 +17,7 @@ dependencies = [
     "tqdm",
     "torchmetrics>=1.8",
     "submodlib-py",
+    "kernels>=0.16.0,<0.17.0",
 ]
 
 [project.scripts]

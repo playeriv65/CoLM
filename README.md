@@ -28,8 +28,12 @@ uv sync --extra eval     # + stock vLLM for math evaluation (LoRA through LoRARe
 uv sync --extra wandb    # + Weights & Biases (opt-in, see below)
 uv sync --all-extras     # everything
 ```
-`submodlib` (facility location) is built from its git repository; `flash-attn`, `traker`, the vLLM
-fork and `bitsandbytes` are no longer needed (attention is `colm/train/attention.py`: PyTorch's varlen kernels).
+`submodlib` (facility location) is built from its git repository; `traker`, the vLLM fork and
+`bitsandbytes` are no longer needed, and `flash-attn` is not compiled: attention is stock
+transformers (`flash_attention_2` for the fp16 training forward, loaded as the hub kernel
+`kernels-community/flash-attn2` through the `kernels` package unless `flash-attn` is installed;
+`sdpa` for the fp32 selection forward). On CPU, on GPUs older than Ampere or without mixed
+precision pass `--attn_implementation sdpa`.
 
 W&B is off by default (`report_to="none"`, nothing imports `wandb`). To log a run, install the extra
 and pass `--report_to wandb` (optionally `--wandb_project/--wandb_entity/--wandb_notes`, or the

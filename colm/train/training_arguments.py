@@ -90,6 +90,16 @@ class TrainingArguments(HFTrainingArguments):
             "mean example length of the data)."
         },
     )
+    selection_attn_implementation: str = field(
+        default="sdpa",
+        metadata={
+            "help": "Attention of the selection forward (fp32, no gradient), which needs a kernel "
+            "that runs in fp32; the training forward uses --attn_implementation. Packed rows "
+            "carry `position_ids` and the cumulative lengths of the flash kernels; stock "
+            "transformers builds the block mask (sdpa, flex_attention) or the varlen call "
+            "(flash_attention_2) from them."
+        },
+    )
     train_max_tokens: int = field(
         default=1536,
         metadata={

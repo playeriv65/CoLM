@@ -241,7 +241,9 @@ def test_skipping_unused_features_selects_the_same_examples(
         ):
             assert (got_state is None) == (want_state is None)
             if got_state is not None:
-                assert torch.equal(got_state, want_state)
+                # not bitwise: the block mask of the stock sdpa sums over the masked keys too,
+                # so float64 rounding depends on the composition of the pack
+                torch.testing.assert_close(got_state, want_state, rtol=1e-9, atol=1e-15)
     if keep:
         assert skipped_any  # the kept sources at least were not forwarded
 

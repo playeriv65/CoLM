@@ -31,7 +31,6 @@ from colm.selection.pool import (
 )
 from colm.selection.select import CoresetSelector
 from colm.selection.zo import zo_parameters
-from colm.train import attention
 from colm.train.memory import MemoryMeter
 from colm.train.step_timing import StepTimer, StepTimingCallback
 
@@ -78,6 +77,9 @@ class _Trainer(Trainer):
         self._select_seconds = 0.0
         self._steps_taken = 0
         self._modes: dict[int, ModeSwitch] = {}
+        # The attention of the training forward is the one the model was loaded with; the
+        # selection forward (fp32, no gradient) switches to `selection_attn_implementation`.
+        self.train_attn = self.model.config._attn_implementation
         self._last_log = None  # (time, global_step) of the previous loss log
         self._timer = StepTimer(self.args.profile_timing)
         if self._timer.enabled:
@@ -103,15 +105,12 @@ class _Trainer(Trainer):
             logger.info(f"Step timing ({self.args.profile_timing}) -> {out_file}")
 
     def describe(self) -> dict:
-        return {"attn_implementation": self.model.config._attn_implementation}
+        return {"attn_implementation": self.train_attn}
 
-    def _require_varlen(self) -> None:
-        """Packed sequences would attend to each other without a kernel that reads cu_seq_lens."""
-        implementation = self.model.config._attn_implementation
-        if implementation != attention.NAME:
-            raise ValueError(
-                f"packed inputs need attn_implementation={attention.NAME}, not {implementation}"
-            )
+    def set_attention(self, implementation: str) -> None:
+        """Attention implementation of the next forwards (a no-op when it is already set)."""
+        if self.model.config._attn_implementation != implementation:
+            self.model.set_attn_implementation(implementation)
 
     def set_mode(self, model: torch.nn.Module, training: bool) -> None:
         """`model.train(training)`, cheaply (`ModeSwitch`)."""
@@ -168,7 +167,6 @@ class _Trainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         inputs = {k: v for k, v in inputs.items() if k != META}
         if "cu_seq_lens_q" in inputs:
-            self._require_varlen()
             inputs["use_cache"] = False  # a cache would end the packed-batch detection
         if "num_options" in inputs:  # classification-style SuperGLUE tasks
             logits = model(
@@ -206,7 +204,6 @@ class CoresetTrainer(_Trainer):
         if not args.coreset:
             raise ValueError("coreset trainers need data_selection_method != none")
         self._check_args()
-        self._require_varlen()
         # The same seed on every rank: numpy is seeded by set_seed before the trainer is built.
         self.zo_seed = int(np.random.randint(1000000000))
         needs_params = args.efficient_mezo or args.data_selection_unit in ("mezo", "masked_grad")
@@ -253,7 +250,8 @@ class CoresetTrainer(_Trainer):
                 if self.batching.train_tokens == UNLIMITED
                 else self.batching.train_tokens,
             },
-            "attn_implementation": self.model.config._attn_implementation,
+            "attn_implementation": self.train_attn,
+            "selection_attn_implementation": args.selection_attn_implementation,
         }
 
     # ----- budgets and sub-batches (differ between the two coreset trainers) --------------
@@ -279,6 +277,7 @@ class CoresetTrainer(_Trainer):
         with self._timer.section("train"):
             with self._timer.fine("mode"):
                 self.set_mode(model, True)
+                self.set_attention(self.train_attn)
                 if hasattr(self.optimizer, "train") and callable(self.optimizer.train):
                     self.optimizer.train()  # schedule-free optimizers
             done = self._train_packs(model, sub_batches, total)
@@ -325,6 +324,7 @@ class CoresetTrainer(_Trainer):
             with t.fine("mode"):
                 if self.extractor.mode is not None:
                     self.set_mode(self.model, self.extractor.mode == "train")
+                    self.set_attention(self.args.selection_attn_implementation)
             with t.fine("pack"):
                 batches = [
                     self._prepare_inputs(b)

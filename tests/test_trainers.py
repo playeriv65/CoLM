@@ -213,3 +213,36 @@ def test_trainer_runs_a_scalar_unit(tmp_path, tokenizer, mixture_file):
     trainer, _ = build(args, tokenizer, mixture_file)
     trainer.train()
     assert math.isfinite(_losses(trainer)[0])
+
+
+def test_selection_and_training_run_with_their_own_attention(
+    tmp_path, tokenizer, mixture_file, monkeypatch
+):
+    """The selection forward uses `selection_attn_implementation`, the training forward the
+    implementation the model was loaded with."""
+    args = make_args(
+        tmp_path,
+        per_device_train_batch_size=4,
+        gradient_accumulation_steps=2,
+        efficient_mezo=True,
+        keep_sources="0",
+        max_steps=1,
+        selection_attn_implementation="eager",
+    )
+    trainer, model = build(args, tokenizer, mixture_file)
+    seen = {"selection": set(), "training": set()}
+
+    def wrap(owner, name, phase):
+        original = getattr(owner, name)
+
+        def call(*a, **k):
+            seen[phase].add(model.config._attn_implementation)
+            return original(*a, **k)
+
+        monkeypatch.setattr(owner, name, call)
+
+    wrap(trainer.extractor, "extract", "selection")
+    wrap(trainer.batching, "loss", "training")
+    trainer.train()
+    assert seen == {"selection": {"eager"}, "training": {"sdpa"}}
+    assert trainer.describe()["attn_implementation"] == "sdpa"

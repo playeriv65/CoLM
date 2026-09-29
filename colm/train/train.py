@@ -25,7 +25,6 @@ from colm.data.get_training_dataset import SupervisedDataset, get_training_datas
 from colm.data.holdout import save_holdout_indices, split_holdout
 from colm.data.superglue import build_superglue
 from colm.eval.eval_loss import add_eval_loss_callback
-from colm.train import attention
 from colm.train.config import parse_args, resolved_config, save_resolved_config, sequence_limit
 from colm.train.data_arguments import get_data_statistics
 from colm.train.model_arguments import add_padding_to_tokenizer
@@ -91,7 +90,7 @@ def build_model(model_args, training_args, tokenizer):
         trust_remote_code=model_args.trust_remote_code,
         cache_dir=model_args.cache_dir,
         revision=model_args.model_revision,
-        attn_implementation=model_args.attn_implementation or attention.register(),
+        attn_implementation=model_args.attn_implementation,
     )
     if not model_args.enable_dropout:
         logger.info("Set dropout to 0")

@@ -45,8 +45,12 @@ are no other launch scripts: do not add shell wrappers, extend the entry points.
   `packing.py` (padding-free batches with the label geometry computed on the CPU, `balanced_shares`),
   `batching.py` (packed batching, the step loss), `pool.py` (collectives that are no-ops in one
   process).
-- `colm/train/attention.py` — `colm_varlen` attention for packed rows (registered with
-  `AttentionInterface`; the default `attn_implementation`). `colm/train/memory.py` — peak memory
+- Attention is stock transformers (no custom kernel): packed rows carry `position_ids` and the
+  flash cumulative lengths (`packing.model_inputs`); the training forward runs
+  `attn_implementation` (`flash_attention_2`, recipe default in `configs/model_profiles.json`; the
+  hub kernel through `kernels` when `flash-attn` is not installed) and the fp32 no-grad selection
+  forward `selection_attn_implementation` (`sdpa`, dense block mask); the trainer switches with
+  `model.set_attn_implementation` (`_Trainer.set_attention`). `colm/train/memory.py` — peak memory
   of every rank per phase (`MemoryMeter`).
   `colm/train/step_timing.py` — opt-in per-phase step timer and its summariser
   (`--profile_timing coarse|fine`; keep new timing sections behind `timer.section`).
@@ -77,7 +81,7 @@ are no other launch scripts: do not add shell wrappers, extend the entry points.
   (a fp32 run of the upstream code agrees with itself in 3 of 20 steps), so end-to-end fp32 runs
   are compared statistically (selection overlap against that noise floor), not bitwise.
 - The packed selection forward must stay fp32 (eps 1e-3: fp16 features are noise) and packed
-  inputs need `use_cache=False` and an attention implementation that reads `cu_seq_lens_q`.
+  inputs need `use_cache=False` (a cache ends the packed-batch detection of transformers).
 
 ## Optimisation work
 

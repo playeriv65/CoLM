@@ -30,7 +30,10 @@ class ModelArguments:
     attn_implementation: str | None = field(
         default=None,
         metadata={
-            "help": "Attention kernel. Default: `colm_varlen` (packed inputs, colm/train/attention.py)."
+            "help": "Attention of the training forward + backward. Default: the recipe's "
+            "(configs/model_profiles.json: `flash_attention_2`, which runs the packed rows as "
+            "variable-length sequences; flash-attn or its hub kernel through `kernels`) with "
+            "mixed precision, transformers' default (sdpa) with `--precision fp32`."
         },
     )
     torch_dtype: Literal["auto", "bfloat16", "float16", "float32", "none"] = field(

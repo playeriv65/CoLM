@@ -1,11 +1,12 @@
 """Padding-free (packed) batches: several examples concatenated in one row.
 
-The layout is the one of transformers' `DataCollatorWithFlattening`: concatenated `input_ids`,
-`position_ids` restarting at every example, no attention mask, and the label of the first token of
-every example is -100, so no loss term crosses an example boundary. The models must be called with
-`use_cache=False` (with a `DynamicCache` transformers no longer detects the packing and the
-sequences attend to each other) and an attention implementation that reads `cu_seq_lens_q`
-(`colm.train.attention`).
+The layout is the one of transformers' `DataCollatorWithFlattening(return_flash_attn_kwargs=True)`:
+concatenated `input_ids`, `position_ids` restarting at every example, the cumulative lengths of the
+flash kernels (`cu_seq_lens_*`, `max_length_*`), no attention mask, and the label of the first
+token of every example is -100, so no loss term crosses an example boundary. The stock attention
+implementations (sdpa / flex block masks, flash varlen) keep the sequences apart from these; the
+models must be called with `use_cache=False` (with a `DynamicCache` transformers no longer detects
+the packing and the sequences attend to each other).
 """
 
 from dataclasses import dataclass

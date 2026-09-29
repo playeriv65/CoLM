@@ -39,6 +39,17 @@ def test_a_plain_run_is_the_paper_recipe(tmp_path):
     assert training.fp16 and model.torch_dtype == "none"
     assert model.lora_target_modules == ["q_proj", "k_proj", "v_proj", "fc1", "fc2"]
     assert (model.lora_r, model.lora_alpha) == (128, 512)
+    # flash varlen for the fp16 training forward, sdpa (fp32-capable) for the selection forward
+    assert model.attn_implementation == "flash_attention_2"
+    assert training.selection_attn_implementation == "sdpa"
+
+
+def test_fp32_runs_keep_the_default_attention(tmp_path):
+    """Flash kernels need fp16 / bf16: without mixed precision the training attention is not set."""
+    model, _, training, _ = _parse(tmp_path, "--precision", "fp32")
+    assert not training.fp16 and model.attn_implementation is None
+    model, *_ = _parse(tmp_path, "--precision", "fp32", "--attn_implementation", "eager")
+    assert model.attn_implementation == "eager"
 
 
 def test_config_files_hold_only_the_differences(tmp_path):
@@ -161,4 +172,4 @@ def test_train_writes_the_resolved_config(tmp_path, tokenizer, mixture_file):
     assert (
         derived["max_seq_length"] == 512 and derived["selected_per_rank"] == 4
     )  # phi context of the fixture
-    assert derived["zo_parameters"] and derived["attn_implementation"] == "colm_varlen"
+    assert derived["zo_parameters"] and derived["attn_implementation"] == "sdpa"

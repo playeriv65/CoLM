@@ -48,7 +48,7 @@ contexts on foreign GPUs; the KV cache of the selection forward was copied.
 | id | what | effect |
 |---|---|---|
 | M1 | The last layer computed the LM head over every position: fp32 logits `[4, T, 51200]` = 419 MB, a contiguous copy, the log-softmax (1.26 GB per +-eps call). | The head runs at the label positions only, on packed rows. |
-| M2 | Padding: 36% of the selection tokens and 45% of the training tokens. | No padding: examples are packed into rows of at most `pack_tokens` (selection) / `train_max_tokens` (training) tokens (`colm/train/attention.py` reads the sequence boundaries; fp32 selection: the memory-efficient kernel, fp16 training: `varlen_attn`). |
+| M2 | Padding: 36% of the selection tokens and 45% of the training tokens. | No padding: examples are packed into rows of at most `pack_tokens` (selection) / `train_max_tokens` (training) tokens (stock transformers attention reads the sequence boundaries from `position_ids` and the flash cumulative lengths; fp32 selection: `sdpa` with the block mask, fp16 training: `flash_attention_2`, variable length). |
 | D1 | Peak memory was recorded on rank 0 only (`max_memory_allocated`, cumulative, reset by the evaluation on rank 0). Rank 0 also holds the gathered features and Adam temporaries (~0.28 GB x ranks). | `MemoryMeter`: the peaks of every rank, per phase (selection, train), allocated and reserved, gathered at every log and saved as `memory.json`. |
 | - | Features are materialised as `[32, 327680]` fp32 (42 MB per rank) although they are 32 scalars times z. | Kept for now (optimisation work). |
 
@@ -75,9 +75,19 @@ per forward 1.17 (0.65); `colm_varlen` (torch `varlen_attn`, flash), one pack of
 EFFICIENT fp32 gradient as reference. The fp16 gradient error remains the pending precision
 decision, not a packing effect.
 
-Bug found on the way: under autocast the rotary embedding leaves q and k in fp32 and v in fp16;
-the packed kernels read garbage (NaN, illegal memory access) until q, k and v were cast to the
-autocast dtype.
+Bug found on the way (with the former custom attention): under autocast the rotary embedding leaves
+q and k in fp32 and v in fp16; the packed kernels read garbage (NaN, illegal memory access) until
+q, k and v were cast to the autocast dtype. The stock flash path casts all three itself.
+
+Stock attention (2026-09-28, task/stock-attn; phi-2 + LoRA r=128, packs of at most 1536 tokens of
+real examples, 4 packs, fp16 autocast against the fp32 MATH gradient of packs of one example;
+relative error, cosine, mean over the packs): `flash_attention_2` (hub kernel) 0.48 (0.89),
+former `colm_varlen` 0.40 (0.92), `flex_attention` 0.36 (0.94), stock fp16 `sdpa` 0.53 (0.88);
+per pack they range 0.19-0.80, and FA2 against `colm_varlen` differ by 0.52 (mean): the fp16
+gradient of this recipe is decided by rounding, not by the kernel. At the operator level (random
+fp16 q, k, v, 32 heads x 80, packed lengths 16 x 220 / 4 sequences / 2 x 2048, forward + backward)
+the hub kernel and torch `varlen_attn` agree to 7e-6 (output) and 1e-5 - 3e-5 (dq, dk, dv), both
+2.4e-4 / 3.5e-4 from the fp32 per-sequence result.
 
 ## Effect on the selection
 

@@ -71,7 +71,7 @@ Per rank: 32 examples forwarded for selection, 16 trained (8 micro-batches of 2)
 | O4 | Drop KV cache + deepcopy in the selection forward | math-exact | done in the port |
 | O5 | lm_head + CE only at label positions in the ZO final layer (keep F2 divisor) | math-exact | lm_head is the largest part of each ±eps call. **Done** in the refactor (M1; the divisor is the example's own label count, E2). |
 | O6 | Packed inputs: training (pack each original sub-batch → identical token mean; bigger packs with per-token weights), selection (pack + per-segment loss sum / original divisor) | math-exact | combine with O1/O5; `use_cache=False` (F5). **Done** in the refactor. |
-| O7 | Attention backend: identify the SDPA backend actually used; test `varlen_attn` on sm_120; flex_attention | kernel only | flash needs fp16/bf16 (see decision D2). **Done**: `colm_varlen` (torch `varlen_attn` for the fp16 training, the efficient kernel with cumulative lengths for the fp32 selection); flash-attn 2 measured, no gain (below). |
+| O7 | Attention backend: identify the SDPA backend actually used; test `varlen_attn` on sm_120; flex_attention | kernel only | flash needs fp16/bf16 (see decision D2). **Done**, then replaced by the stock mechanisms (last section): torch `varlen_attn` + a custom efficient-kernel selection were ~4% faster in the step than `flash_attention_2` (hub kernel) + stock `sdpa`. |
 | O8 | Train the 16 selected examples in 1–2 large batches with per-token weights reproducing the per-sub-batch means | math-exact (dropout masks differ) | bs 2 micro-batches underuse the GPU. **Done** (packs under the token budget `train_max_tokens`, default 1536; 0 = one pack per step). |
 | O9 | Reuse selection-forward activations for the training backward | needs D3 | Blockers: eval vs train dropout, fp32 vs fp16, backward cannot drop unselected rows of a batched graph. Viable variant: per-example graphs, backward only the selected ones; est. −16% compute, 40–50 GB activation memory (estimate). |
 | O10 | 1-D facility location on r_i (F1) | approximate (adam-ε, ties) | needs D4 |
@@ -159,7 +159,7 @@ What changed and its exactness class (code in `colm/selection/`, `colm/train/tra
 | O1 | `CoresetSelector.needed(sources, total)` decides from the source ids, before any forward, which features can change the selection; the others are not computed (zeros, never read). The pool is all-gathered first (cheap), the needed examples are shared over the ranks by token count (`balanced_shares`). Skipped: `keep_sources`, sources with zero quota, sources selected in full when `mezo_optim=sgd`; everything if the kept examples fill the budget. With random tie-breaks (`balanced`), sampled coordinates, a global coordinate ranking (`source_wise_selection=none`) or a pool transform only the kept sources are skipped. | math-exact | float64 CPU: randomised pools/sources/quotas, indices, weights and the Adam moments identical (`tests/test_opt.py`), trainer path identical over 4 steps with kept sources / adam / sgd; 2- and 4-rank gloo runs identical to one process. |
 | O3 / M2 | The MeZO extractor returns g_i (one scalar per example); rank 0 builds the features `g_i z` (`Extractor.expand`, z from the same seeded generator). Only scalars are gathered: no `[N, 327680]` D2H, pickle, gather, H2D. | bitwise on the same g_i | feature matrix = `g[:, None] * z` with `atol=0`; g_i bit-identical whatever the packing in float64. z is regenerated on rank 0: identical to the other ranks' z on GPUs of one architecture. |
 | O8 | The selected examples of a step are packed greedily into forwards of at most `train_max_tokens` tokens (default 1536, memory mode; 0 = unlimited: one pack for the whole step, speed mode). The gradients of the packs accumulate; an example longer than the budget goes alone, none is split. The loss is a token sum over the step divided by the step's label count: independent of the grouping (`test_unlimited_and_bounded_budgets_train_the_same_step`: float64, one pack vs several, gradients 1e-9, loss 1e-12). An out-of-memory error says which value to set. `SubsetTrainer` packs too. | math-exact (fp rounding order; dropout masks differ, as for any re-batching) | float64: gradients of one pack / packs under a budget = the micro-batch loop to 1e-9 (weighted and unweighted), loss to 1e-12. GPU, fp32 with exact attention: micro-batch packs vs the new packs 1.3e-3 relative gradient difference (max 1.9e-3), loss 1.5e-6 (the fp32 floor). |
-| O7 | Training attention kernel unchanged: torch `varlen_attn` (flash) on the packed fp16 rows. flash-attn 2.8.3 (built for sm_120) gives the same numbers (relative 7e-6 to 2e-5 between the two kernels, both 2.4e-4 to 3.8e-4 from fp32 per sequence) and no speed-up (fwd+bwd of one layer, 16 x 220 tokens: 0.42 ms torch, 0.49 ms flash-attn; 6k tokens: 0.99 vs 1.00; 2 x 2048: 0.90 vs 0.91): not adopted, no dependency, no build. End to end, fp16 gradient against the exact fp32 gradient (relative, cosine): `colm_varlen` 0.44 (0.90) one pack of 16 examples, 0.41 (0.94) one example per forward; stock fp16 sdpa 1.17 (0.65) (`docs/errors.md`). | kernel only | see left; the fp16 gradient error is the pending precision decision. |
+| O7 | (Historic, before the stock attention: ) Training attention kernel: torch `varlen_attn` (flash) on the packed fp16 rows. flash-attn 2.8.3 (built for sm_120) gives the same numbers (relative 7e-6 to 2e-5 between the two kernels, both 2.4e-4 to 3.8e-4 from fp32 per sequence) and no speed-up (fwd+bwd of one layer, 16 x 220 tokens: 0.42 ms torch, 0.49 ms flash-attn; 6k tokens: 0.99 vs 1.00; 2 x 2048: 0.90 vs 0.91): not adopted, no dependency, no build. End to end, fp16 gradient against the exact fp32 gradient (relative, cosine): `colm_varlen` 0.44 (0.90) one pack of 16 examples, 0.41 (0.94) one example per forward; stock fp16 sdpa 1.17 (0.65) (`docs/errors.md`). | kernel only | see left; the fp16 gradient error is the pending precision decision. |
 | H | Label geometry (positions, targets, segment, counts) computed on the CPU in `pack` (no `nonzero` / `bincount` synchronisation in the losses); `ModeSwitch`: flat flag pass instead of the recursive `train()` walk (4 ms -> 0.3 ms per switch, PreTrainedModel's override is skipped only while `use_kernels` is off); `dataloader_num_workers=1` (tokenising the next pool overlaps the step: 11.5 ms); the unused pool norm of `mezo_transform=none` is no longer computed; `_features` casts to at least fp32 (float64 stays). | bitwise / host only | worker: same pools (test); mode switch: same flags on all modules (test); the census below. |
 | O11 | not done (per-architecture layer replay). | | |
 
@@ -278,3 +278,46 @@ Profile of the fp32 prefix (3.8k tokens, 482 ms, `torch.profiler`): GEMM 79% of 
 reaches 70 TFLOP/s: O13), LoRA (skinny GEMMs + `mul` + `add`) 27%: O12, layer-norm / GELU /
 attention the rest. O11 and the memoisation of the parallel MLP in the ±eps replays (Phi's MLP
 does not depend on v_proj: ~17 ms) are each worth ~1.5% and need per-architecture code.
+
+### Stock attention instead of `colm_varlen` (`colm/train/attention.py` deleted)
+
+The custom attention is replaced by transformers 5.17's own mechanisms; nothing else about the
+computation changes (precision recipe unchanged: fp16 autocast training, fp32 selection).
+
+- **Training: `attn_implementation="flash_attention_2"`.** Without the `flash-attn` package (no wheel
+  for torch 2.13, a source build takes minutes and gigabytes) transformers loads the hub kernel
+  `kernels-community/flash-attn2` through the `kernels` package (`kernels>=0.16,<0.17`, added to
+  `pyproject.toml`; transformers 5.17 refuses 0.17; version 2 of the repo has a torch 2.13 / sm_120
+  build). The stock flash path takes the packed layout of
+  `DataCollatorWithFlattening(return_flash_attn_kwargs=True)` (`position_ids`, `cu_seq_lens_*`,
+  `max_length_*`; without the cumulative lengths it derives them from `position_ids` with a
+  `nonzero` per layer) and casts q, k, v to the autocast dtype itself. Needs Ampere or newer:
+  on Turing pass `--attn_implementation sdpa`.
+- **Selection (fp32, no gradient): `selection_attn_implementation="sdpa"`** (dense block mask built
+  from `position_ids`; the flash kernels need fp16). `flex_attention` also runs in fp32 but was
+  2.8x slower (recompiles per pack shape). The trainer switches between the two with
+  `model.set_attn_implementation` (1.1 ms + 1.5 ms per step).
+- **Selection agreement** (6 pools of 32 examples, phi-2 at initialisation, packs of the default
+  selection size; reference: stock sdpa with the exact MATH kernel): median relative difference of
+  g_i 1.1e-3 (`colm_varlen`), 1.2e-3 (sdpa), 1.3e-3 (flex); the same pool run twice with one
+  implementation differs by 1.4e-4 to 2.3e-4 (median); selected sets overlap the reference in
+  14.8 / 14.7 / 14.8 of 16 (identical sets in 2 / 1 / 3 of 6 pools; the selection is decided at
+  fp32 rounding level, `docs/errors.md` E1: upstream against itself 13.5 of 16).
+- **Training gradients**: `docs/errors.md` (all fp16 kernels are in the same class, 0.4-0.5 relative
+  from the fp32 gradient; hub kernel and torch `varlen_attn` agree to 1e-5 at the operator level;
+  fwd + bwd of one layer 0.67 / 0.76 / 0.83 ms (hub) against 0.47 / 0.52 / 0.85 ms (torch) for
+  16 x 220 / 4 sequences of 300-500 / 2 x 2048 tokens).
+- **Step time** (phi-2, `configs/timing_phi2_efficient.json`, 70 steps, steps 11-70, `--profile_timing
+  fine`, physical GPU 0 alone, same seed = same pools, loadavg 22-35 from other users, one run each):
+
+| ms / optimizer step | `colm_varlen` (varlen_attn train, efficient kernel selection) | stock (flash_attention_2 train, sdpa selection) |
+|---|---:|---:|
+| step | 1374 | 1425 (+3.7%) |
+| selection | 925 | 967 (+4.5%) |
+| · prefix (31 layers, fp32) | 807 | 845 (+4.7%) |
+| train | 433 | 442 (+2.1%; per trained token +3.2%) |
+| · forward / backward | 202 / 227 | 206 / 231 |
+| forwarded / trained tokens per step | 6097 / 3819 | 6097 / 3780 |
+| 50-step sliding mean, max deviation | 1.8% | 1.4% |
+
+  The selection cost is the dense `[T, T]` block mask of `sdpa` on packs of ~1.5k tokens (4 examples).

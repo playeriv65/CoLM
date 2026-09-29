@@ -16,7 +16,6 @@ from colm.selection.packing import (
     pack,
 )
 from colm.selection.zo import LastLayerSplit
-from colm.train import attention
 
 
 def _examples(tokenizer, texts, prompt=3, start=0):
@@ -41,8 +40,7 @@ TEXTS = ["Hello world, this is CoLM.", "Short one.", "A third, slightly longer e
 
 @pytest.fixture()
 def model(tokenizer):
-    attention.register()
-    model = model_fp64(tokenizer, attn=attention.NAME)
+    model = model_fp64(tokenizer)
     model.eval()
     return model
 
@@ -94,13 +92,15 @@ def test_last_layer_split_on_a_pack(tokenizer, model):
     torch.testing.assert_close(replay, full, rtol=0, atol=1e-10)
 
 
-def test_a_pack_of_a_cache_is_not_the_trap(tokenizer, model):
-    """The varlen attention reads cu_seq_lens, so even a cache cannot make sequences attend to each other."""
+def test_model_inputs_carry_the_flash_layout_and_no_cache(tokenizer):
+    """`position_ids` and the cumulative lengths of the flash kernels; a cache would end the
+    packed-batch detection of the stock mask / flash paths, so it is switched off."""
     batch = pack(_examples(tokenizer, TEXTS))
-    with torch.no_grad():
-        logits = model(**{**model_inputs(batch), "use_cache": True}).logits
-        reference = model(**model_inputs(batch)).logits
-    torch.testing.assert_close(logits, reference, rtol=0, atol=1e-10)
+    inputs = model_inputs(batch)
+    assert inputs["use_cache"] is False and "attention_mask" not in inputs
+    assert (
+        inputs["cu_seq_lens_q"] is batch["cu_seq_lens_q"] and inputs["position_ids"].shape[0] == 1
+    )
 
 
 def test_the_loss_of_an_example_does_not_depend_on_its_pack(tmp_path, tokenizer, mixture_file):

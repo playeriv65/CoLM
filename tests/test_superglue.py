@@ -14,7 +14,6 @@ from colm.data.superglue import (
     classification_loss,
     option_examples,
 )
-from colm.train import attention
 from colm.train.trainers import CustomTrainer, SubsetTrainer
 
 
@@ -113,7 +112,7 @@ def test_generation_task_with_selection(tmp_path, tokenizer, unit):
         max_steps=2,
     )
     trainer = SubsetTrainer(
-        model=model_fp64(tokenizer, attn=attention.register()),
+        model=model_fp64(tokenizer),
         args=args,
         train_dataset=ListDataset(data),
         processing_class=tokenizer,
