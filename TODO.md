@@ -49,6 +49,9 @@ Nothing below is deleted without the user's yes.
   `rank-sweep-v3` (1.3 GB), `rank-sweep-v4` (2.2 GB, valid for tail 0), the smoke/timing runs
   `out/*-5steps-*` (2.6 GB), `*-130steps-*`, `*-60steps-*`, `out/stockattn-*`, and the diagnostics
   directories (`precision-*`, `fp16-prefix-*`, `layer-signal-*`, `seed-recheck-*`).
+- `$HF_HOME/datasets/json` (local NVMe): ~3,300 Arrow-cache directories (~3 GB), most of them 24 KB
+  leftovers of earlier pytest runs (tests now use a temporary datasets cache) and one 189 MB cache per
+  distinct absolute path of `MathInstruct.jsonl` (one per worktree that trained).
 - Logs in the main checkout `logs/` from 2026-09-28 (aborted timing runs, first failed smoke run).
 - The wrap-up run of 2026-09-29: `artifacts/CoLM/wrapup/` (acceptance output + logs, ~2.5 GB with the
   checkpoints) after the numbers in `docs/startup-overhead.md` are no longer needed.
