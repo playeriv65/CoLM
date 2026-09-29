@@ -33,6 +33,7 @@ def make_args(out, **kw) -> TrainingArguments:
         last_layer_index=NUM_LAYERS - 1,
         zo_dim=16,
         dataloader_num_workers=0,
+        efficient_mezo=False,  # the tests name the trainer they want
     )
     base.update(kw)
     return TrainingArguments(**base)

@@ -11,7 +11,7 @@ This repository is the official implementation of our ICLR 2025 paper [Mini-batc
   - [🔗 Quick Links](#-quick-links)
   - [Install Requirements](#install-requirements)
   - [Data Preparation](#data-preparation)
-  - [Training](#training)
+  - [Quickstart](#quickstart)
   - [Evaluation](#evaluation)
   - [Tests](#tests)
   - [Bugs or Questions?](#bugs-or-questions)
@@ -29,7 +29,7 @@ uv sync --extra wandb    # + Weights & Biases (opt-in, see below)
 uv sync --all-extras     # everything
 ```
 `submodlib` (facility location) is built from its git repository; `flash-attn`, `traker`, the vLLM
-fork and `bitsandbytes` are no longer needed (attention uses PyTorch SDPA).
+fork and `bitsandbytes` are no longer needed (attention is `colm/train/attention.py`: PyTorch's varlen kernels).
 
 W&B is off by default (`report_to="none"`, nothing imports `wandb`). To log a run, install the extra
 and pass `--report_to wandb` (optionally `--wandb_project/--wandb_entity/--wandb_notes`, or the
@@ -45,78 +45,112 @@ bash scripts/link-external.sh    # data -> $COLM_ARTIFACT_ROOT/datasets/colm, ou
 The linked paths are declared in `external-paths.json` (`COLM_ARTIFACT_ROOT` defaults to
 `/mnt/data2/zelin4593`). Configs read `data/MathInstruct.jsonl`.
 
-## Training
+## Quickstart
+Three commands (installed by `uv sync`), each with `--help`:
+
+| command | what |
+|---|---|
+| `colm-train` | train (CoLM or the full-batch baseline) on 1, 2 or N GPUs |
+| `colm-eval loss \| accuracy \| superglue` | evaluation loss, answer accuracy (vLLM), SuperGLUE |
+| `colm-sweep create \| work \| summary` | job queue of the LoRA rank sweep |
+
 ```bash
-scripts/run_math_efficient.sh <gpu_ids>     # e.g. scripts/run_math_efficient.sh 2,3
-scripts/run.sh <config.json> <gpu_ids> [--extra_flag value ...]
+colm-train --gpus 2 --model_name_or_path microsoft/phi-2            # 1 GPU: the paper recipe
+colm-train --gpus 2,3 --model_name_or_path microsoft/phi-2          # 2 GPUs: same config, same command
+colm-train configs/math_phi2.json --gpus 0,1,2,3 --max_steps 100    # a config file + flags
 ```
-GPU ids can also come from `COLM_GPUS`; there is no default. `nproc_per_node` is derived from the list.
-Logs go to `logs/<config>-gpu<ids>-np<n>-<timestamp>.log`; every loss log also records
-`step_time_s`, `select_time_s` and `peak_mem_gb`. Runs without `output_dir` are written to
+GPU ids are always explicit (`--gpus`, or `COLM_GPUS`): the GPUs are shared and reserved. One process
+runs per GPU under `torchrun`; the logs go to `logs/<config>-gpu<ids>-np<n>-<time>.log`. With more
+GPUs the pool of every step grows with the number of ranks (the per-rank pool is
+`per_device_train_batch_size x gradient_accumulation_steps` examples, 32 by default), and the
+selection is made over all ranks together.
+
+**Configuration.** Every option has the value of the paper recipe as its default, so a run needs the
+model and little else; `colm-train --help` lists every option with its default and meaning. A config
+file (JSON, keys = option names) holds only what differs from the defaults, flags override it, and
+unknown keys or wrong values fail at load. `configs/math_phi2_efficient.json` is the plain
+recipe, `configs/math_phi2.json` the one-example-per-micro-batch variant. Values derived from the
+model (the last layer, LoRA targets, precision, context length) are computed; the resolved
+configuration (defaults included) is printed at the start and saved as
+`<output_dir>/resolved_config.json`. Runs without `output_dir` go to
 `out/<model>-<data>-lora-gas..-bs..-<method>-<unit>-...-<steps>steps-seed<seed>`.
-All hyperparameters live in the dataclasses of `colm/train/*_arguments.py`
-(paper defaults) and the JSON files in `configs/`.
+
+```
+before  configs/math_phi2_efficient.json    {"model_name_or_path": "microsoft/phi-2", "train_files": ["data/MathInstruct.jsonl"],
+                                             "max_steps": 1024, "per_device_train_batch_size": 4, "gradient_accumulation_steps": 8,
+                                             "efficient_mezo": true}      scripts/run_math_efficient.sh 2,3
+after   configs/math_phi2_efficient.json    {"model_name_or_path": "microsoft/phi-2"}      colm-train configs/math_phi2_efficient.json --gpus 2,3
+```
+
+**What a step does** (`colm/train/trainers.py`, `colm/selection/`): the selection pool of a rank (all
+examples of one optimizer step, packed without padding) goes through the extractor of
+`data_selection_unit` (default: the batched last-layer MeZO estimate), the features of all ranks
+are gathered on rank 0, facility location picks `small_batch_ratio` of the pool source by source,
+the picks are broadcast and every rank trains on its share. The loss of a step is the mean over
+all label tokens of the examples trained in the step (all ranks). Peak GPU memory is measured on every
+rank and per phase (`memory.json`, `peak_mem_*` in the log).
+
+**Known errors of the upstream code** are fixed by default (`docs/errors.md`). The temporary switch
+`--legacy true` reproduces the upstream behaviour for alignment runs only; it is scheduled for
+removal, do not add new uses.
 
 ### Step timing
 `--profile_timing coarse|fine` (default `off`: no synchronize, no overhead) writes a per-phase
 wall-clock breakdown of every optimizer step to
 `<profile_timing_dir or output_dir>/step_timing-<run>-<level>-rank<r>-<timestamp>.jsonl`.
 Each section boundary calls `torch.cuda.synchronize()`, so GPU work is charged to the phase that
-launched it; `fine` adds per-layer / per-op sections (more syncs, slightly inflated totals).
-`--profile_census_steps N` counts aten ops, host<->device copies (bytes) and synchronizing calls per
-phase during the first N steps (slow; keep N within the summary warmup). Summarise with
+launched it. `--profile_census_steps N` counts aten ops, host<->device copies (bytes) and
+synchronizing calls per phase during the first N steps (slow; keep N within the summary warmup).
+Summarise with
 ```bash
 python -m colm.train.step_timing logs/step_timing-....jsonl --warmup 10   # table + .summary.json
 ```
 Every parent node is reported with an explicit `other` residual; the root is the measured time
-between consecutive optimizer steps. Configs: `configs/timing_phi2_efficient.json` (fine, 130 steps,
-census on the 10 warmup steps) and `configs/timing_phi2_efficient_coarse.json` (coarse, 60 steps).
-Measured breakdown of the default config: `docs/optimization-backlog.md` ("Measured baseline").
+between consecutive optimizer steps. Configs: `configs/timing_phi2_efficient.json` (fine, 130 steps)
+and `configs/timing_phi2_efficient_coarse.json` (coarse, 60 steps).
 
-Note: We implement CoLM with an efficient last-layer zeroth-order gradient estimation that requires approximately only one forward pass of the model. While the selection time is negligible (<0.1s), CoLM still introduces additional overhead, such as synchronizing gradients before selection, broadcasting selected indices back, padding after selection (which can make some samples longer), transferring tensors between CPU and GPU, context switching, and so on. In the paper, we report the ideal training time of our method which is the forward pass time for a batch size of 128 + the forward and backward pass time for a batch size of 64.
-
-Note: the logged training `loss` of the CoLM trainers is the mean loss divided by `small_batch_ratio`
-(kept from the original implementation so curves remain comparable).
+Note: CoLM introduces overhead besides the selection forward: gathering features and examples,
+broadcasting the selected indices, host/device transfers. In the paper we report the ideal
+training time: the forward pass of the pool + the forward and backward pass of the trained
+fraction.
 
 ## Evaluation
 Accuracy (vLLM, PoT with CoT backup) of base models and LoRA checkpoints; one process and one vLLM
-engine serve every checkpoint and dataset given:
+engine serve every checkpoint and dataset given. The defaults are the paper protocol (0-shot,
+gsm8k math numglue svamp deepmind simuleq, the dtype of the model's recipe, LoRA for adapters):
 ```bash
-CUDA_VISIBLE_DEVICES=<gpu> python -u math_eval/run_open.py --model out/run/checkpoint-512 out/run/checkpoint-1024 \
-    --dataset gsm8k math numglue svamp deepmind simuleq --shots 0 --stem_flan_type pot_prompt \
-    --model_max_length 2048 --cot_backup --use_vllm --dtype float16 --enable_lora
-# --dry_run builds the prompts of every dataset and loads no model; --limit N evaluates N examples
+colm-eval accuracy --model out/run/checkpoint-512 out/run/checkpoint-1024    # on CUDA_VISIBLE_DEVICES
+colm-eval accuracy --model microsoft/phi-2 --dataset gsm8k --limit 20 --dry_run   # prompts only
 ```
 Results: `<checkpoint>/outputs/<name>.jsonl` (+ `.metrics.json` with accuracy and counts); finished
-outputs are skipped on a rerun, partial ones (`.partial`) are recomputed. The legacy
-`math_eval/eval_finetuned.sh` / `eval_pretrained.sh` still work.
+outputs are skipped on a rerun, partial ones (`.partial`) are recomputed.
 
-**Loss** (`colm/eval/eval_loss.py`): mean token NLL of teacher-forced reference solutions, pooled
-over the whole set, on (a) `heldout`: `holdout_size` MathInstruct examples removed from training
-(`holdout_seed`, drawn uniformly; indices saved as `holdout_indices.json`) and (b) `gsm8k`: the
-GSM8K test solutions in the MathInstruct CoT style. Off by default (`holdout_size=0`,
+**Loss** (`colm-eval loss`, `colm/eval/eval_loss.py`): mean token NLL of teacher-forced reference
+solutions, pooled over the whole set, on (a) `heldout`: `holdout_size` MathInstruct examples
+removed from training (`holdout_seed`; whole groups of the same question, so no held-out question
+is trained on in another solution format; indices saved as `holdout_indices.json`) and (b) `gsm8k`:
+the GSM8K test solutions in the MathInstruct CoT style. Off by default (`holdout_size=0`,
 `eval_loss_steps=[]` = the paper recipe); `holdout_size > 0` is a deviation from the paper (fewer
 training examples) and must be the same across compared runs. With `eval_loss_steps` the trainer
-evaluates after those steps (`<output_dir>/eval_loss.jsonl`, `eval_<set>_loss` in the trainer log;
-the step after an evaluation is longer, the training peak memory is recorded separately). A
-saved adapter is evaluated with
-`python -m colm.eval.eval_loss --train_config <json> --adapter <ckpt>... [--base] --output <json>`.
+evaluates after those steps on rank 0 (`<output_dir>/eval_loss.jsonl`, `eval_<set>_loss` in the
+trainer log; the step after an evaluation is longer). A saved adapter is evaluated with
+`colm-eval loss --train_config <json> --adapter <ckpt>... [--base] --output <json>`.
 
 ### LoRA rank sweep (queue)
 `configs/rank_sweep/sweep.json` expands into a file queue (`colm/jobs`): one JSON job per file,
 one worker drains it serially on one GPU (atomic claim by rename, `done/` / `failed/` with exit
 code, wall clock and log path; a lock file, no polling, no process-name matching).
 ```bash
-python -m colm.jobs.rank_sweep --sweep configs/rank_sweep/sweep.json --queue queues/rank-sweep
-python -m colm.jobs.worker --queue queues/rank-sweep --gpu 0 --dry-run    # print resolved jobs
-python -u -m colm.jobs.worker --queue queues/rank-sweep --gpu 0          # run (GPU id is required)
-python -m colm.jobs.summarize --sweep configs/rank_sweep/sweep.json       # out/rank-sweep/summary.md
+colm-sweep create --sweep configs/rank_sweep/sweep.json --queue queues/rank-sweep
+colm-sweep work --queue queues/rank-sweep --gpu 0 --dry-run    # print resolved jobs
+colm-sweep work --queue queues/rank-sweep --gpu 0              # run (the GPU id is required)
+colm-sweep summary --sweep configs/rank_sweep/sweep.json       # out/rank-sweep/summary.md
 ```
 Design, arms and timing: `TODO.md` ("LoRA rank sweep").
 
 ## Tests
 ```bash
-CUDA_VISIBLE_DEVICES="" uv run pytest -q     # CPU: tiny random Phi, selection, trainers, 2-rank gloo, eval loss, job queue
+CUDA_VISIBLE_DEVICES="" uv run pytest -q     # CPU: tiny random Phi, selection, trainers, 2- and 4-rank gloo, eval loss, job queue
 uv run ruff format . && uv run ruff check .
 ```
 

@@ -13,9 +13,11 @@ import argparse
 import json
 import subprocess
 import sys
+from dataclasses import fields
 from pathlib import Path
 
 from colm.jobs.file_queue import JobQueue
+from colm.train.training_arguments import TrainingArguments
 
 REPO = Path(__file__).resolve().parents[2]
 TRAIN_CONFIG = "train_config.json"
@@ -37,6 +39,10 @@ def load_spec(path, repo: Path = REPO) -> tuple[dict, dict]:
     spec = json.loads((repo / path).read_text())
     base = json.loads((repo / spec["base_config"]).read_text())
     base.update(spec.get("train_overrides", {}))
+    # The run names and the summary need these; a config only lists what differs from the defaults.
+    defaults = {f.name: f.default for f in fields(TrainingArguments)}
+    for key in ("max_steps", "seed", "save_steps"):
+        base.setdefault(key, defaults[key])
     return spec, base
 
 

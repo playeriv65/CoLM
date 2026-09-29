@@ -22,22 +22,37 @@ class TrainingArguments(HFTrainingArguments):
     (the former colm/scripts/train/base_training_args.sh).
     """
 
-    # --- HF fields with CoLM defaults ---
+    # --- Recipe of the paper: the defaults of a plain run ---
     output_dir: str | None = field(
         default=None,
         metadata={"help": "Output directory. Auto-generated from the key parameters if unset."},
     )
-    do_train: bool = field(default=True, metadata={"help": "Whether to run training."})
-    per_device_train_batch_size: int = field(default=1)
-    num_train_epochs: float = field(default=4.0)
+    max_steps: int = field(default=1024, metadata={"help": "Optimizer steps."})
+    per_device_train_batch_size: int = field(
+        default=4,
+        metadata={
+            "help": "Examples per forward pass (micro-batch) of one rank. The selection pool of a "
+            "rank is this x gradient_accumulation_steps examples."
+        },
+    )
+    gradient_accumulation_steps: int = field(
+        default=8, metadata={"help": "Micro-batches per selection pool (and per optimizer step)."}
+    )
     learning_rate: float = field(default=2e-5)
     warmup_steps: float = field(default=0.03, metadata={"help": "Warmup steps, or ratio if < 1."})
-    optim: str = field(default="adamw_torch")
     logging_steps: float = field(default=1)
     save_strategy: str = field(default="steps")
     save_steps: float = field(default=256)
+    save_only_model: bool = field(
+        default=True, metadata={"help": "Checkpoints hold the adapter only (no optimizer state)."}
+    )
     seed: int = field(default=0)
-    remove_unused_columns: bool = field(default=False)
+    remove_unused_columns: bool = field(
+        default=False,
+        metadata={
+            "help": "Keep the per-example bookkeeping the batches carry besides the model inputs."
+        },
+    )
     report_to: None | str | list[str] = field(
         default="none",
         metadata={"help": "Integrations to report to. W&B is opt-in: pass 'wandb' explicitly."},
@@ -83,8 +98,12 @@ class TrainingArguments(HFTrainingArguments):
         metadata={"help": "How to select the small batch from the large batch."},
     )
     efficient_mezo: bool = field(
-        default=False,
-        metadata={"help": "Batched last-layer MeZO estimate (SubsetTrainerEfficient)."},
+        default=True,
+        metadata={
+            "help": "Batched last-layer MeZO estimate (SubsetTrainerEfficient, the paper's method). "
+            "Off: SubsetTrainer, one example per micro-batch (per_device_train_batch_size=1) and "
+            "any data_selection_unit."
+        },
     )
     data_selection_unit: Literal[
         "rep", "mezo", "masked_grad", "completion_length", "length_loss_weighted"
@@ -189,6 +208,30 @@ class TrainingArguments(HFTrainingArguments):
     )
     only_train_option: bool = field(default=True, metadata={"help": "Only train the option part."})
 
+    def _validate(self) -> None:
+        """Fail fast on inconsistent selection settings."""
+        if not self.coreset:
+            return
+        if not 0 < self.small_batch_ratio <= 1:
+            raise ValueError(f"small_batch_ratio must be in (0, 1], got {self.small_batch_ratio}")
+        if self.efficient_mezo:
+            if self.data_selection_unit != "mezo":
+                raise ValueError(
+                    "efficient_mezo estimates MeZO features: set data_selection_unit=mezo"
+                )
+            if self.mezo_transform != "none" or "weighted" in self.data_selection_method:
+                raise ValueError("efficient_mezo applies no mezo_transform and trains unweighted")
+            if int(self.micro_batch_size * self.small_batch_ratio) < 1:
+                raise ValueError("per_device_train_batch_size * small_batch_ratio must be >= 1")
+        else:
+            if self.micro_batch_size != 1:
+                raise ValueError(
+                    "without efficient_mezo every example is its own micro-batch: "
+                    "per_device_train_batch_size=1 and gradient_accumulation_steps = the pool size"
+                )
+            if int(self.pool_micro_batches * self.small_batch_ratio) < 1:
+                raise ValueError("gradient_accumulation_steps * small_batch_ratio must be >= 1")
+
     @property
     def pool_micro_batches(self) -> int:
         return self.per_device_train_batch_size // (self.micro_batch_size or 1)
@@ -216,3 +259,4 @@ class TrainingArguments(HFTrainingArguments):
             self.gradient_accumulation_steps = 1
         super().__post_init__()
         check_literals(self)
+        self._validate()

@@ -19,6 +19,11 @@ dependencies = [
     "submodlib-py",
 ]
 
+[project.scripts]
+colm-train = "colm.cli:train"
+colm-eval = "colm.cli:evaluate"
+colm-sweep = "colm.cli:sweep"
+
 [project.optional-dependencies]
 # Experiment tracking is opt-in: nothing imports wandb unless report_to includes it.
 wandb = ["wandb"]

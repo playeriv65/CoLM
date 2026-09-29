@@ -6,7 +6,8 @@ import torch
 @dataclass
 class DataArguments:
     train_files: list[str] = field(
-        default_factory=list, metadata={"help": "Training data files (jsonl) or a hub dataset id."}
+        default_factory=lambda: ["data/MathInstruct.jsonl"],
+        metadata={"help": "Training data files (jsonl) or a hub dataset id."},
     )
     data_dir: str = field(default="data", metadata={"help": "Directory of the local data files."})
     hf_datasets_cache_dir: str | None = field(

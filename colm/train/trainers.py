@@ -79,6 +79,9 @@ class _Trainer(Trainer):
             )
             logger.info(f"Step timing ({self.args.profile_timing}) -> {out_file}")
 
+    def describe(self) -> dict:
+        return {"attn_implementation": self.model.config._attn_implementation}
+
     def _require_varlen(self) -> None:
         """Packed sequences would attend to each other without a kernel that reads cu_seq_lens."""
         implementation = self.model.config._attn_implementation
@@ -168,6 +171,11 @@ class CoresetTrainer(_Trainer):
         )
         build = legacy.build_extractor if args.legacy else build_extractor
         self.extractor = build(args, self.model, self.zo_params, self.zo_seed)
+        dims = sum(p.numel() for _, p in self.zo_params) or self.model.config.hidden_size
+        if not self.extractor.scalar and args.zo_dim > dims:
+            raise ValueError(
+                f"zo_dim={args.zo_dim} exceeds the {dims} features of {args.data_selection_unit}"
+            )
         self.selector = CoresetSelector(
             args,
             self.model.config.num_hidden_layers,
@@ -186,6 +194,21 @@ class CoresetTrainer(_Trainer):
             f"in micro-batches of {args.micro_batch_size}, {self._per_rank(args.pool_micro_batches)} "
             f"selected per rank"
         )
+
+    def describe(self) -> dict:
+        """What the trainer derived from the options, the model and the data."""
+        args = self.args
+        return {
+            "zo_seed": self.zo_seed,
+            "zo_parameters": [n for n, _ in self.zo_params],
+            "pool_per_rank": args.per_device_train_batch_size,
+            "micro_batch_size": args.micro_batch_size,
+            "selected_per_rank": self._per_rank(args.pool_micro_batches),
+            "pack_tokens": None
+            if args.legacy
+            else {"selection": self.batching.select_tokens, "training": self.batching.train_tokens},
+            "attn_implementation": self.model.config._attn_implementation,
+        }
 
     # ----- budgets and sub-batches (differ between the two coreset trainers) --------------
     def _check_args(self):

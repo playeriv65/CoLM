@@ -4,6 +4,7 @@
 torchrun --nproc_per_node N -m colm.train.train config.json [--flag value ...]
 """
 
+import json
 import logging
 import os
 import sys
@@ -25,7 +26,7 @@ from colm.data.holdout import save_holdout_indices, split_holdout
 from colm.data.superglue import build_superglue
 from colm.eval.eval_loss import add_eval_loss_callback
 from colm.train import attention
-from colm.train.config import parse_args, sequence_limit
+from colm.train.config import parse_args, resolved_config, save_resolved_config, sequence_limit
 from colm.train.data_arguments import get_data_statistics
 from colm.train.model_arguments import add_padding_to_tokenizer
 from colm.train.trainers import CustomTrainer, SubsetTrainer, SubsetTrainerEfficient
@@ -168,6 +169,10 @@ def build_data(model_args, data_args, training_args, eval_args, tokenizer, limit
     if isinstance(dataset, SupervisedDataset):
         collator = make_collator(training_args, tokenizer)
         for source in training_args.keep_source_ids:
+            if not 0 <= source < dataset.num_sources:
+                raise ValueError(
+                    f"keep_sources has source {source}, the data has {dataset.num_sources}"
+                )
             logger.info(f"Kept in full: {dataset.all_data_sources[source]}")
     else:  # pre-tokenised (LESS) data: no per-example bookkeeping, so no selection
         if training_args.coreset:
@@ -234,6 +239,13 @@ def main(argv=None):
         data_collator=collator,
     )
     add_eval_loss_callback(trainer, eval_args, heldout, training_args.output_dir, limit)
+    config = resolved_config(
+        model_args, data_args, training_args, eval_args,
+        {"max_seq_length": limit, "train_examples": len(train_dataset), **trainer.describe()},
+    )  # fmt: skip
+    logger.info(f"Resolved config:\n{json.dumps(config, indent=1, default=str)}")
+    if training_args.should_save:
+        save_resolved_config(config, training_args.output_dir)
 
     result = trainer.train(resume_from_checkpoint=model_args.checkpoint_path)
     trainer.save_model()

@@ -1,8 +1,4 @@
 {
-    "model_name_or_path": "microsoft/phi-2",
-    "train_files": ["data/MathInstruct.jsonl"],
-    "max_steps": 5,
-    "per_device_train_batch_size": 4,
-    "gradient_accumulation_steps": 8,
-    "efficient_mezo": true
+    "_doc": "The paper recipe (efficient MeZO, pool 4 x 8 per GPU, 1024 steps) is the default of every option: only the model is needed.",
+    "model_name_or_path": "microsoft/phi-2"
 }

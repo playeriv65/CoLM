@@ -1,5 +1,10 @@
 # Selection / step optimisation backlog
 
+> Status: optimisation work is stopped. The numbers below were measured on the padded upstream
+> path (`legacy`); the default path is packed without padding (`docs/errors.md`), so the token
+> counts, the padding findings and the per-step times no longer apply as they are. F4 below is
+> corrected (26.9%, not 36.9%).
+
 Goal: make a CoLM training step faster **without changing the mini-batch selection semantics**.
 Every item states whether it is bitwise-exact, mathematically exact (float rounding only), or a
 semantic change that needs an explicit decision. Measure before and after each item with the
@@ -33,7 +38,7 @@ Per rank: 32 examples forwarded for selection, 16 trained (8 micro-batches of 2)
   `model.forward`, so upstream's ±eps calls were fp32 as well; the port matches upstream and O2 is a
   precision change (D2), not a fidelity fix. The fp32 prefix forward is confirmed as the dominant
   cost (see "Measured baseline").
-- **F4 — `keep_sources` = the 10 smallest MathInstruct sources = 36.9% of examples.** Their
+- **F4 — `keep_sources` = the 10 smallest MathInstruct sources = 26.9% of examples** (70,615 / 262,039; an earlier version said 36.9%). Their
   features are discarded before the Adam transform; the 4 selected sources (aqua_rat 34.1%,
   math50k_camel 18.9%, gsm_rft 10.8%, mathqa 9.3%) are the only ones whose features matter.
 - **F5 — packed inputs in transformers 5.17 work** (`DataCollatorWithFlattening`, restarting

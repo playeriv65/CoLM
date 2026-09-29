@@ -30,11 +30,26 @@ def test_real_sweep_spec_is_the_agreed_design():
         (8, 32),
         (8, 512),
     ]
-    assert base["max_steps"] == 1024 and base["per_device_train_batch_size"] == 4
-    assert base["gradient_accumulation_steps"] == 8 and base["efficient_mezo"] is True
-    assert base["report_to"] == "none" and base["seed"] == 0
     assert base["save_steps"] == 512 and base["holdout_size"] == 1000
     assert spec["eval"]["checkpoints"] == [512, 1024]
+    # ... on top of the defaults of the paper recipe
+    from colm.jobs.rank_sweep import train_config
+    from colm.train.config import parse_args
+
+    config = REPO / "resolved-sweep-arm.json"
+    config.write_text(json.dumps(train_config(spec, spec["arms"][1], base)))
+    try:
+        model, _, training, eval_args = parse_args([str(config)])
+    finally:
+        config.unlink()
+    assert training.max_steps == 1024 and training.micro_batch_size == 4
+    assert training.pool_micro_batches == 8 and training.efficient_mezo is True
+    assert (
+        training.seed == 0
+        and training.report_to == []
+        and (model.lora_r, model.lora_alpha) == (16, 64)
+    )
+    assert eval_args.holdout_size == 1000
 
 
 def test_queue_order_and_contents(repo):

@@ -8,7 +8,7 @@ comes from `configs/model_profiles.json` and is resolved before the training arg
 import json
 import os
 import sys
-from dataclasses import fields
+from dataclasses import asdict, fields
 
 from transformers import AutoConfig, HfArgumentParser
 
@@ -50,13 +50,30 @@ def model_profile(model_args: ModelArguments) -> dict:
     return profiles.get(config.model_type, profiles["default"])
 
 
+def eval_dtype(model_name_or_path: str) -> str:
+    """Generation dtype of a model or LoRA checkpoint: its recipe's precision (see model_profiles.json)."""
+    from peft import PeftConfig
+
+    adapter = os.path.join(model_name_or_path, "adapter_config.json")
+    base = (
+        PeftConfig.from_pretrained(model_name_or_path).base_model_name_or_path
+        if os.path.exists(adapter)
+        else model_name_or_path
+    )
+    profile = model_profile(ModelArguments(model_name_or_path=base))
+    return "float16" if profile["precision"] == "fp16_amp" else "bfloat16"
+
+
 def parse_args(argv: list[str] | None = None):
     """(model, data, training, eval) arguments from a JSON file and / or flags."""
     argv = list(sys.argv[1:] if argv is None else argv)
+    if "-h" in argv or "--help" in argv:
+        HfArgumentParser(DATACLASSES, prog="colm-train").print_help()
+        raise SystemExit(0)
     defaults = {}
     if argv and argv[0].endswith(".json"):
         with open(argv.pop(0)) as f:
-            defaults = json.load(f)
+            defaults = {k: v for k, v in json.load(f).items() if not k.startswith("_")}  # "_doc"
         known = {f.name for dc in DATACLASSES for f in fields(dc)}
         if unknown := set(defaults) - known:
             raise ValueError(f"unknown config keys: {sorted(unknown)}")
@@ -85,3 +102,20 @@ def parse_args(argv: list[str] | None = None):
         else:
             extra.update(bf16=True, torch_dtype="bfloat16")
     return parse(DATACLASSES, extra)
+
+
+def resolved_config(model_args, data_args, training_args, eval_args, derived: dict) -> dict:
+    """Every option of the run with its value (defaults included) and the values derived from the model and data."""
+    return {
+        "model": asdict(model_args),
+        "data": asdict(data_args),
+        "eval": asdict(eval_args),
+        "training": training_args.to_dict(),
+        "derived": derived,
+    }
+
+
+def save_resolved_config(config: dict, output_dir: str) -> None:
+    os.makedirs(output_dir, exist_ok=True)
+    with open(os.path.join(output_dir, "resolved_config.json"), "w") as f:
+        json.dump(config, f, indent=1, default=str)
