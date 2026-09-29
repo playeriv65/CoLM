@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 def get_training_dataset(
     train_files: list[str],
     tokenizer,
-    max_seq_length=None,
+    context_length: int,
     sample_percentage=1.0,
     subset_index_files=None,
     template_variation=False,
@@ -31,7 +31,11 @@ def get_training_dataset(
     hf_datasets_cache_dir=None,
     subset_selection="use_small_sources",
 ):
-    """Training data of the files. `max_seq_length`: examples that do not fit are dropped, never cut."""
+    """Training data of the files, tokenised without truncation.
+
+    `context_length` is the context window of the model: an example above it is dropped (counted
+    and logged per source), never cut.
+    """
     raw_datasets = load_raw_dataset(
         train_files,
         sample_percentage=sample_percentage,
@@ -46,12 +50,10 @@ def get_training_dataset(
             list_data_dict=raw_datasets,
             tokenizer=tokenizer,
             template_variation=template_variation,
-            max_length=max_seq_length,
+            context_length=context_length,
         )
-    else:  # pre-tokenised (LESS) formats are cut at max_seq_length
-        lm_datasets = encode_data(
-            raw_datasets, tokenizer, max_seq_length or tokenizer.model_max_length
-        )
+    else:  # pre-tokenised (LESS) formats: prompt/completion or messages
+        lm_datasets = encode_data(raw_datasets, tokenizer, context_length)
 
     return lm_datasets
 
@@ -211,112 +213,93 @@ def load_raw_dataset(
     return sampled_dataset
 
 
-def encode_data(
-    raw_datasets,
-    tokenizer,
-    max_seq_length,
-    processing_num_workers=10,
-    overwrite_cache=False,
-    func_name="encode_with_messages_format",
-):
-    """encode data with the specified tokenizer and the chat format."""
-    # if already encoded, return
-    if "input_ids" in raw_datasets.features:
-        return raw_datasets
-    encode_function = get_encode_function(raw_datasets, tokenizer, max_seq_length, func_name)
-    logger.info(f"Encode function: {encode_function}")
-    # To speed up this part, we use multiprocessing.
-    lm_datasets = raw_datasets.map(
-        encode_function,
-        batched=False,
-        num_proc=processing_num_workers,
-        load_from_cache_file=not overwrite_cache,
-        desc="Tokenizing and reformatting instruction data",
-    )
+def encode_data(raw_datasets, tokenizer, context_length: int, processing_num_workers=10):
+    """Tokenise the `prompt`/`completion` or `messages` rows (no truncation) and drop the examples
+    above `context_length` tokens; the drops are counted and logged per source."""
+    if "input_ids" not in raw_datasets.features:  # else already encoded
+        encode_function = get_encode_function(raw_datasets, tokenizer)
+        logger.info(f"Encode function: {encode_function.func.__name__}")
+        # To speed up this part, we use multiprocessing.
+        raw_datasets = raw_datasets.map(
+            encode_function,
+            batched=False,
+            num_proc=processing_num_workers,
+            load_from_cache_file=False,
+            desc="Tokenizing and reformatting instruction data",
+        )
+    lm_datasets = drop_too_long(raw_datasets, context_length)
     lm_datasets.set_format(type="pt")
-
     return lm_datasets
 
 
-def get_encode_function(
-    raw_datasets, tokenizer, max_seq_length, func="encode_with_messages_format"
-):
-    """get encode function based on the dataset."""
+def drop_too_long(encoded_datasets, context_length: int):
+    """The rows of an encoded dataset with at most `context_length` tokens (never truncated)."""
+    lengths = np.array([len(ids) for ids in encoded_datasets["input_ids"]])
+    fits = lengths <= context_length
+    columns = encoded_datasets.column_names
+    source_column = next((c for c in ("dataset", "source") if c in columns), None)
+    names = encoded_datasets[source_column] if source_column else ["all"] * len(lengths)
+    dropped = Counter(name for name, fit in zip(names, fits, strict=True) if not fit)
+    logger.info(
+        f"Dropped {sum(dropped.values())} of {len(lengths)} examples longer than "
+        f"{context_length} tokens (never truncated): {dict(dropped)}"
+    )
+    return encoded_datasets.select(np.flatnonzero(fits))
+
+
+def get_encode_function(raw_datasets, tokenizer):
+    """The encode function of the columns of the dataset."""
     if "prompt" in raw_datasets.column_names and "completion" in raw_datasets.column_names:
-        encode_function = partial(
-            encode_with_prompt_completion_format,
-            tokenizer=tokenizer,
-            max_seq_length=max_seq_length,
-        )
-    elif "messages" in raw_datasets.column_names:
-        if func == "encode_with_messages_format":
-            encode_func = encode_with_messages_format
-        else:
-            encode_func = encode_with_messages_format_with_llama2_chat
-        encode_function = partial(
-            encode_func,
-            tokenizer=tokenizer,
-            max_seq_length=max_seq_length,
-        )
-    else:
-        raise ValueError(
-            "You need to have either 'prompt'&'completion' or 'messages' in your column names."
-        )
-    return encode_function
+        return partial(encode_with_prompt_completion_format, tokenizer=tokenizer)
+    if "messages" in raw_datasets.column_names:
+        return partial(encode_with_messages_format, tokenizer=tokenizer)
+    raise ValueError(
+        "You need to have either 'prompt'&'completion' or 'messages' in your column names."
+    )
 
 
-def encode_with_prompt_completion_format(example, tokenizer, max_seq_length):
+def encode_with_prompt_completion_format(example, tokenizer):
     """
     Original implementation of the function: https://github.com/allenai/open-instruct/blob/9ebcb582cfc243a6dab75b4302fa432784db26c2/open_instruct/finetune.py#L238
 
-    Here we assume each example has 'prompt' and 'completion' fields.
-    We concatenate prompt and completion and tokenize them together because otherwise prompt will be padded/trancated
-    and it doesn't make sense to follow directly with the completion.
+    Here we assume each example has 'prompt' and 'completion' fields. The prompt and the
+    completion (+ EOS) are tokenised separately and concatenated, so that the tokens of the prompt
+    are exactly those of the prompt alone, as at inference; the prompt is masked from the loss.
+    Nothing is truncated.
     """
-    # if prompt doesn't end with space and completion doesn't start with space, add space
-    if not example["prompt"].endswith((" ", "\n", "\t")) and not example["completion"].startswith(
-        (" ", "\n", "\t")
-    ):
-        example_text = example["prompt"] + " " + example["completion"]
-    else:
-        example_text = example["prompt"] + example["completion"]
-    example_text = example_text + tokenizer.eos_token
-    tokenized_example = tokenizer(
-        example_text, return_tensors="pt", max_length=max_seq_length, truncation=True
-    )
-    input_ids = tokenized_example.input_ids
+    prompt = tokenizer(example["prompt"], verbose=False)["input_ids"]
+    completion = tokenizer(
+        example["completion"] + tokenizer.eos_token, add_special_tokens=False, verbose=False
+    )["input_ids"]
+    input_ids = torch.tensor(prompt + completion)
     labels = input_ids.clone()
-    tokenized_prompt = tokenizer(
-        example["prompt"], return_tensors="pt", max_length=max_seq_length, truncation=True
-    )
-    # mask the prompt part for avoiding loss
-    labels[:, : tokenized_prompt.input_ids.shape[1]] = IGNORE_INDEX
-    attention_mask = torch.ones_like(input_ids)
-
+    labels[: len(prompt)] = IGNORE_INDEX  # mask the prompt part for avoiding loss
     return {
-        "input_ids": input_ids.flatten(),
-        "labels": labels.flatten(),
-        "attention_mask": attention_mask.flatten(),
+        "input_ids": input_ids,
+        "labels": labels,
+        "attention_mask": torch.ones_like(input_ids),
     }
 
 
-def encode_with_messages_format(example, tokenizer, max_seq_length):
+def encode_with_messages_format(example, tokenizer):
     """
     Original implementation of the function: https://github.com/allenai/open-instruct/blob/9ebcb582cfc243a6dab75b4302fa432784db26c2/open_instruct/finetune.py#L264C1-L322C1
 
     Here we assume each example has a 'messages' field Each message is a dict with 'role' and 'content' fields.
-    We concatenate all messages with the roles as delimiters and tokenize them together.
-    Used for LESS datasets.
+    We concatenate all messages with the roles as delimiters and tokenize them together (the
+    boundaries of the messages are found by tokenising the text up to them). Only the assistant
+    messages are labels. Used for LESS datasets. Nothing is truncated.
     """
     messages = example["messages"]
     if len(messages) == 0:
         raise ValueError("messages field is empty.")
 
-    example_text = concat_messages(messages, tokenizer)
-    tokenized_example = tokenizer(
-        example_text, return_tensors="pt", max_length=max_seq_length, truncation=True
+    def n_tokens(text):
+        return len(tokenizer(text, verbose=False)["input_ids"])
+
+    input_ids = torch.tensor(
+        tokenizer(concat_messages(messages, tokenizer), verbose=False)["input_ids"]
     )
-    input_ids = tokenized_example.input_ids
     labels = input_ids.clone()
 
     # mask the non-assistant part for avoiding loss
@@ -325,12 +308,7 @@ def encode_with_messages_format(example, tokenizer, max_seq_length):
             if message_idx == 0:
                 message_start_idx = 0
             else:
-                message_start_idx = tokenizer(
-                    concat_messages(messages[:message_idx], tokenizer),
-                    return_tensors="pt",
-                    max_length=max_seq_length,
-                    truncation=True,
-                ).input_ids.shape[1]
+                message_start_idx = n_tokens(concat_messages(messages[:message_idx], tokenizer))
             if message_idx < len(messages) - 1 and messages[message_idx + 1]["role"] == "assistant":
                 # here we also ignore the role of the assistant
                 messages_so_far = (
@@ -338,20 +316,12 @@ def encode_with_messages_format(example, tokenizer, max_seq_length):
                 )
             else:
                 messages_so_far = concat_messages(messages[: message_idx + 1], tokenizer)
-            message_end_idx = tokenizer(
-                messages_so_far, return_tensors="pt", max_length=max_seq_length, truncation=True
-            ).input_ids.shape[1]
-            labels[:, message_start_idx:message_end_idx] = IGNORE_INDEX
-
-            if message_end_idx >= max_seq_length:
-                break
-
-    attention_mask = torch.ones_like(input_ids)
+            labels[message_start_idx : n_tokens(messages_so_far)] = IGNORE_INDEX
 
     return {
-        "input_ids": input_ids.flatten(),
-        "labels": labels.flatten(),
-        "attention_mask": attention_mask.flatten(),
+        "input_ids": input_ids,
+        "labels": labels,
+        "attention_mask": torch.ones_like(input_ids),
     }
 
 
@@ -363,9 +333,10 @@ class SupervisedDataset(Dataset):
         list_data_dict: datasets.arrow_dataset.Dataset,
         tokenizer: transformers.PreTrainedTokenizer,
         template_variation: bool,
-        max_length: int | None = None,
+        context_length: int,
     ):
-        """`max_length`: drop the examples whose prompt + completion (+ EOS) have more tokens."""
+        """Examples whose prompt + completion (+ EOS) have more than `context_length` tokens are
+        dropped (counted and logged per source), never truncated."""
         super().__init__()
         prompts = (
             utils.PROMPT_TEMPLATE[random.randrange(len(utils.PROMPT_TEMPLATE))]
@@ -394,8 +365,7 @@ class SupervisedDataset(Dataset):
             self.indices.append(example.get("original_index", -1))
             self.completion_lengths.append(example.get("completion_length", -1))
         logger.info(f"Discarded {discarded} examples with an empty output")
-        if max_length is not None:
-            self._drop_too_long(tokenizer, names, max_length)
+        self._drop_too_long(tokenizer, names, context_length)
 
         # Data source names as integers, in sorted order.
         self.all_data_sources = sorted(set(names))
@@ -404,8 +374,8 @@ class SupervisedDataset(Dataset):
         self.data_sources = [ids[name] for name in names]
         self.num_sources = len(ids)
 
-    def _drop_too_long(self, tokenizer, names, max_length: int) -> None:
-        """Keep the examples that fit in `max_length` tokens (and have a completion to learn)."""
+    def _drop_too_long(self, tokenizer, names, context_length: int) -> None:
+        """Keep the examples that fit in `context_length` tokens (and have a completion to learn)."""
         fits, lengths = [], []
         # The tokenizer's own threads (train.py turns them off for the data loader workers).
         parallelism = os.environ.get("TOKENIZERS_PARALLELISM")
@@ -417,18 +387,20 @@ class SupervisedDataset(Dataset):
             )["input_ids"]
             lengths += [len(p) + len(c) for p, c in zip(prompts, completions, strict=True)]
             fits += [
-                0 < len(c) and len(p) + len(c) <= max_length
+                0 < len(c) and len(p) + len(c) <= context_length
                 for p, c in zip(prompts, completions, strict=True)
             ]
         os.environ["TOKENIZERS_PARALLELISM"] = parallelism or "false"
         dropped = Counter(name for name, fit in zip(names, fits) if not fit)
         logger.info(
-            f"Dropped {sum(dropped.values())} of {len(fits)} examples longer than {max_length} "
+            f"Dropped {sum(dropped.values())} of {len(fits)} examples longer than {context_length} "
             f"tokens (never truncated): {dict(dropped)}"
         )
         for values in (self.sources, self.targets, names, self.indices, self.completion_lengths):
             values[:] = [v for v, fit in zip(values, fits, strict=True) if fit]
         kept = [n for n, fit in zip(lengths, fits, strict=True) if fit]
+        if not kept:
+            raise ValueError(f"no example fits the context window of {context_length} tokens")
         self.mean_tokens = sum(kept) / len(kept)
 
     def __len__(self):
@@ -526,73 +498,3 @@ def concat_messages(messages, tokenizer):
             raise ValueError("Invalid role: {}".format(message["role"]))
 
     return message_text
-
-
-def encode_with_messages_format_with_llama2_chat(example, tokenizer, max_seq_length):
-    """
-    Here we assume each example has a 'messages' field Each message is a dict with 'role' and 'content' fields.
-    We concatenate all messages with the roles as delimiters and tokenize them together.
-    """
-    messages = example["messages"]
-    if len(messages) == 0:
-        raise ValueError("messages field is empty.")
-
-    def _concat_messages(
-        messages,
-    ):
-        B_INST, E_INST = "[INST]", "[/INST]"
-        bos = "<s>"
-        eos = "</s>"
-        formatted_text = ""
-
-        for message in messages:
-            if message["role"] == "user":
-                formatted_text += bos + f"{B_INST} {(message['content']).strip()} {E_INST}"
-            elif message["role"] == "assistant":
-                formatted_text += f" {(message['content'])} " + eos
-            else:
-                raise ValueError(
-                    "Llama2 chat template only supports 'system', 'user' and 'assistant' roles. Invalid role: {}.".format(
-                        message["role"]
-                    )
-                )
-        formatted_text = formatted_text[len(bos) :]
-
-        return formatted_text
-
-    example_text = _concat_messages(messages).strip()
-    tokenized_example = tokenizer(
-        example_text, return_tensors="pt", max_length=max_seq_length, truncation=True
-    )
-    input_ids = tokenized_example.input_ids
-    labels = input_ids.clone()
-
-    # mask the non-assistant part for avoiding loss
-    for message_idx, message in enumerate(messages):
-        if message["role"] != "assistant":
-            if message_idx == 0:
-                message_start_idx = 0
-            else:
-                message_start_idx = tokenizer(
-                    _concat_messages(messages[:message_idx]),
-                    return_tensors="pt",
-                    max_length=max_seq_length,
-                    truncation=True,
-                ).input_ids.shape[1]
-            if messages[message_idx + 1]["role"] == "assistant":
-                messages_so_far = _concat_messages(messages[: message_idx + 1])
-            message_end_idx = tokenizer(
-                messages_so_far, return_tensors="pt", max_length=max_seq_length, truncation=True
-            ).input_ids.shape[1]
-            labels[:, message_start_idx:message_end_idx] = IGNORE_INDEX
-
-            if message_end_idx >= max_seq_length:
-                break
-
-    attention_mask = torch.ones_like(input_ids)
-
-    return {
-        "input_ids": input_ids.flatten(),
-        "labels": labels.flatten(),
-        "attention_mask": attention_mask.flatten(),
-    }

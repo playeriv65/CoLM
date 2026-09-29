@@ -81,6 +81,11 @@ are no other launch scripts: do not add shell wrappers, extend the entry points.
 - Exactness is float64 identity on CPU: in fp32 the MeZO feature is decided at rounding level
   (a fp32 run of the upstream code agrees with itself in 3 of 20 steps), so end-to-end fp32 runs
   are compared statistically (selection overlap against that noise floor), not bitwise.
+- Nothing truncates and no option may reintroduce it (a test greps for it): the only sequence
+  limit is the model's context window (`colm.train.config.context_length`); examples above it are
+  dropped and counted per source (`PromptTooLong` in SuperGLUE evaluation). Memory is controlled
+  by how many whole examples go into a packed forward (`train_max_tokens`, `pack_tokens`).
+  `max_length_q/k` (flash varlen kwargs) and vLLM/HF `max_new_tokens` are not truncation.
 - The Phi-2 model profile sets `selection_prefix_dtype=float16`: the unperturbed
   prefix uses fp16 autocast and requires fp32 model weights, while the perturbed
   last layer and loss remain fp32. Other profiles retain their explicit precision

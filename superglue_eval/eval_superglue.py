@@ -26,7 +26,6 @@ parser.add_argument("--use_vllm", action="store_true", default=False)
 parser.add_argument(
     "--cache_dir", default=None, type=str, help="HF cache override (default: $HF_HOME)"
 )
-parser.add_argument("--max_length", default=2048, type=int)
 # Data
 parser.add_argument(
     "--task",
@@ -87,7 +86,7 @@ def forward(args, model, tokenizer, input_ids, option_len=None, generation=False
             num_beams=args.num_beams,
             top_p=args.top_p,
             top_k=args.top_k,
-            max_new_tokens=min(args.max_new_tokens, args.max_length - input_ids.size(1)),
+            max_new_tokens=min(args.max_new_tokens, args.context_length - input_ids.size(1)),
             num_return_sequences=1,
             eos_token_id=[
                 tokenizer.encode(args.eos_token, add_special_tokens=False)[-1],
@@ -117,7 +116,9 @@ def forward(args, model, tokenizer, input_ids, option_len=None, generation=False
 
 def one_step_pred(args, task, model, tokenizer, train_samples, eval_sample, verbose=False):
     """
-    Return the prediction on the eval sample. In ICL, use train_samples as demonstrations
+    Return the prediction on the eval sample. In ICL, use train_samples as demonstrations.
+    A prompt that does not fit the context window of the model raises `PromptTooLong`: prompts are
+    never truncated.
     """
     if verbose:
         print("========= Example =========")
@@ -131,7 +132,7 @@ def one_step_pred(args, task, model, tokenizer, train_samples, eval_sample, verb
         train_samples,
         eval_sample,
         tokenizer,
-        max_length=args.max_length,
+        args.context_length,
         generation=task.generation,
         max_new_tokens=args.max_new_tokens,
     )
@@ -144,7 +145,7 @@ def one_step_pred(args, task, model, tokenizer, train_samples, eval_sample, verb
             train_samples,
             eval_sample,
             tokenizer,
-            max_length=args.max_length,
+            args.context_length,
             sfc=args.sfc,
             icl_sfc=args.icl_sfc,
             generation=task.generation,
@@ -355,10 +356,12 @@ def main():
                 cache_dir=args.cache_dir,
             )
             model = PeftModel.from_pretrained(base_model, args.model, device_map="auto")
+            args.context_length = base_model.config.max_position_embeddings
         else:
             model = AutoModelForCausalLM.from_pretrained(
                 args.model, device_map="auto", dtype="auto", cache_dir=args.cache_dir
             )
+            args.context_length = model.config.max_position_embeddings
         model.eval()
 
         # pad token is not added by default for pretrained models

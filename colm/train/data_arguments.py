@@ -14,13 +14,6 @@ class DataArguments:
     hf_datasets_cache_dir: str | None = field(
         default=None, metadata={"help": "datasets cache override (default: $HF_HOME)."}
     )
-    max_seq_length: int | None = field(
-        default=None,
-        metadata={
-            "help": "Optional cap on prompt + completion tokens (default: the model's context "
-            "window). Examples above it are dropped, never truncated."
-        },
-    )
     subset_selection: Literal[
         "random",
         "balanced_longest_selection",

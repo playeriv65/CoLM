@@ -25,7 +25,7 @@ from colm.data.get_training_dataset import SupervisedDataset, get_training_datas
 from colm.data.holdout import save_holdout_indices, split_holdout
 from colm.data.superglue import build_superglue
 from colm.eval.eval_loss import add_eval_loss_callback
-from colm.train.config import parse_args, resolved_config, save_resolved_config, sequence_limit
+from colm.train.config import context_length, parse_args, resolved_config, save_resolved_config
 from colm.train.data_arguments import get_data_statistics
 from colm.train.model_arguments import add_padding_to_tokenizer
 from colm.train.trainers import CustomTrainer, SubsetTrainer, SubsetTrainerEfficient
@@ -136,14 +136,14 @@ def build_model(model_args, training_args, tokenizer):
     return model
 
 
-def build_data(model_args, data_args, training_args, eval_args, tokenizer, limit):
+def build_data(data_args, training_args, eval_args, tokenizer, context):
     """(train dataset, collator, analysis dataset, held-out examples)."""
     if "superglue" in data_args.train_files[0]:
-        return (*build_superglue(model_args, data_args, training_args, tokenizer), None)
+        return (*build_superglue(data_args, training_args, tokenizer, context), None)
     dataset = get_training_dataset(
         data_args.train_files,
         tokenizer=tokenizer,
-        max_seq_length=limit,
+        context_length=context,
         sample_percentage=data_args.percentage,
         subset_index_files=data_args.subset_index_files,
         seed=data_args.sample_data_seed,
@@ -202,17 +202,17 @@ def main(argv=None):
     logger.info(f"{training_args}\n{model_args}\n{data_args}")
 
     set_seed(training_args.seed)
-    limit = sequence_limit(model_args, data_args)
+    context = context_length(model_args)
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.tokenizer_name or model_args.model_name_or_path,
-        model_max_length=limit,
+        model_max_length=context,
         cache_dir=model_args.cache_dir,
         revision=model_args.model_revision,
     )
     add_padding_to_tokenizer(tokenizer)
     model = build_model(model_args, training_args, tokenizer)
     train_dataset, collator, analysis_dataset, heldout = build_data(
-        model_args, data_args, training_args, eval_args, tokenizer, limit
+        data_args, training_args, eval_args, tokenizer, context
     )
 
     if not training_args.coreset:
@@ -231,10 +231,10 @@ def main(argv=None):
         processing_class=tokenizer,
         data_collator=collator,
     )
-    add_eval_loss_callback(trainer, eval_args, heldout, training_args.output_dir, limit)
+    add_eval_loss_callback(trainer, eval_args, heldout, training_args.output_dir, context)
     config = resolved_config(
         model_args, data_args, training_args, eval_args,
-        {"max_seq_length": limit, "train_examples": len(train_dataset), **trainer.describe()},
+        {"context_length": context, "train_examples": len(train_dataset), **trainer.describe()},
     )  # fmt: skip
     logger.info(f"Resolved config:\n{json.dumps(config, indent=1, default=str)}")
     if training_args.should_save:

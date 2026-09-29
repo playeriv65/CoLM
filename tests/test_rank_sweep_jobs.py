@@ -98,7 +98,7 @@ def test_queue_order_and_contents(repo):
     assert "--enable_lora" not in base_acc["argv"] and "--use_vllm" in base_acc["argv"]
     assert base_acc["argv"][base_acc["argv"].index("--model") + 1] == "microsoft/phi-2"
     assert "--output_dir" in base_acc["argv"] and "requires" not in base_acc
-    for flag in ("--shots", "--stem_flan_type", "--dtype", "--model_max_length", "--dataset"):
+    for flag in ("--shots", "--stem_flan_type", "--dtype", "--max_new_tokens", "--dataset"):
         i, j = acc["argv"].index(flag), base_acc["argv"].index(flag)
         assert acc["argv"][i : i + 2] == base_acc["argv"][j : j + 2]
     meta = JobQueue(root).read_meta()

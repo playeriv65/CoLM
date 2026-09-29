@@ -33,7 +33,7 @@ from colm.selection.select import CoresetSelector
 def test_label_geometry_of_a_pack_equals_the_device_computation(tokenizer, mixture_file):
     from colm.data.get_training_dataset import get_training_dataset
 
-    dataset = get_training_dataset([mixture_file], tokenizer=tokenizer, max_seq_length=512)
+    dataset = get_training_dataset([mixture_file], tokenizer=tokenizer, context_length=512)
     examples = [dataset[i] for i in range(9)]
     from colm.data.get_training_dataset import make_collator
 

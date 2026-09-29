@@ -19,7 +19,7 @@ from torch.utils.data import TensorDataset
 from transformers import AutoTokenizer
 
 from colm.selection.packing import Example, pack
-from colm.train.config import parse_args, sequence_limit
+from colm.train.config import context_length, parse_args
 from colm.train.model_arguments import add_padding_to_tokenizer
 from colm.train.train import build_model
 from colm.train.trainers import SubsetTrainerEfficient
@@ -43,10 +43,10 @@ def main():
     )
     parser.add_argument("--output_dir", default="/tmp/colm-memory")
     cli, rest = parser.parse_known_args()
-    model_args, data_args, training_args, _ = parse_args(
+    model_args, _, training_args, _ = parse_args(
         [cli.config, "--output_dir", cli.output_dir, "--report_to", "none", *rest]
     )
-    length = cli.length or sequence_limit(model_args, data_args)
+    length = cli.length or context_length(model_args)
     tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
     add_padding_to_tokenizer(tokenizer)
     model = build_model(model_args, training_args, tokenizer)

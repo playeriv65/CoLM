@@ -40,21 +40,28 @@ class ListDataset(Dataset):
         return self.data[idx]
 
 
-def convert_samples(samples, task, tokenizer, max_length, max_new_tokens, only_train_option):
-    """Tokenised training examples of task samples."""
-    data = []
+def convert_samples(samples, task, tokenizer, context_length, only_train_option):
+    """Tokenised training examples of task samples.
+
+    A sample with a sequence above `context_length` tokens is dropped (counted and logged), never
+    truncated.
+    """
+    data, dropped = [], 0
     for index, sample in enumerate(tqdm(samples, mininterval=10)):
-        encoded, option_lens = utils.encode_prompt(
-            task,
-            task.get_template(),
-            [],
-            sample,
-            tokenizer,
-            max_length=max_length,
-            generation=task.generation,
-            generation_with_gold=True,
-            max_new_tokens=max_new_tokens,
-        )
+        try:
+            encoded, option_lens = utils.encode_prompt(
+                task,
+                task.get_template(),
+                [],
+                sample,
+                tokenizer,
+                context_length,
+                generation=task.generation,
+                generation_with_gold=True,
+            )
+        except utils.PromptTooLong:
+            dropped += 1
+            continue
         if task.generation:
             correct = 0
         elif isinstance(sample.correct_candidate, list):
@@ -80,6 +87,10 @@ def convert_samples(samples, task, tokenizer, max_length, max_new_tokens, only_t
             if only_train_option:
                 item["option_len"] = option_lens[correct]
             data.append(item)
+    logger.info(
+        f"Dropped {dropped} of {len(samples)} samples longer than {context_length} tokens "
+        "(never truncated)"
+    )
     return data
 
 
@@ -142,7 +153,7 @@ def classification_loss(logits, batch) -> torch.Tensor:
     return torch.stack(losses).mean()
 
 
-def build_superglue(model_args, data_args, training_args, tokenizer):
+def build_superglue(data_args, training_args, tokenizer, context_length):
     """(train dataset, collator, None) of a `superglue-<task>` / `load-superglue-<task>` run."""
     name = data_args.train_files[0]
     task = get_task(name.split("-")[-1])
@@ -155,12 +166,12 @@ def build_superglue(model_args, data_args, training_args, tokenizer):
         samples,
         task,
         tokenizer,
-        tokenizer.model_max_length,
-        training_args.max_new_tokens,
+        context_length,
         training_args.only_train_option,
     )
     logger.info(
-        f"{len(samples)} {name} examples (generation={task.generation}, classification={task.classification})"
+        f"{len(data)} of {len(samples)} {name} examples kept (generation={task.generation}, "
+        f"classification={task.classification})"
     )
     if task.classification:
         if training_args.coreset:

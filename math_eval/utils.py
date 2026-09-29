@@ -429,7 +429,7 @@ def answer_clean(dataset: str, direct_answer_trigger_for_fewshot: tuple, pred: s
 
 
 def get_answer(
-    examples, questions, model, tokenizer, form, max_length: int = 300, do_sample: bool = False
+    examples, questions, model, tokenizer, form, max_new_tokens: int = 300, do_sample: bool = False
 ):
     prompt_no_input, prefix = get_prompt(examples, form=form)
     # Formulate the real prompt
@@ -445,7 +445,7 @@ def get_answer(
             input_ids=batch.input_ids.to(model.device),
             attention_mask=batch.attention_mask.to(model.device),
             pad_token_id=tokenizer.pad_token_id,
-            generation_config=GenerationConfig(do_sample=do_sample, max_new_tokens=max_length),
+            generation_config=GenerationConfig(do_sample=do_sample, max_new_tokens=max_new_tokens),
         )
     output_strs = []
     for output_id in output_ids.tolist():
@@ -456,7 +456,7 @@ def get_answer(
 
 
 def get_ensemble_answer(
-    examples, questions, model, tokenizer, form, num_samples: int, max_length: int = 300
+    examples, questions, model, tokenizer, form, num_samples: int, max_new_tokens: int = 300
 ):
     prompt_no_input, prefix = get_prompt(examples, form=form)
     # Formulate the real prompt
@@ -474,7 +474,7 @@ def get_ensemble_answer(
             pad_token_id=tokenizer.pad_token_id,
             generation_config=GenerationConfig(
                 do_sample=True,
-                max_new_tokens=max_length,
+                max_new_tokens=max_new_tokens,
                 num_return_sequences=num_samples,
                 temperature=0.7,
             ),

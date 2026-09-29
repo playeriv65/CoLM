@@ -231,9 +231,6 @@ class TrainingArguments(HFTrainingArguments):
     )
 
     # --- SuperGLUE ---
-    max_new_tokens: int = field(
-        default=50, metadata={"help": "Maximum number of generated tokens."}
-    )
     only_train_option: bool = field(default=True, metadata={"help": "Only train the option part."})
 
     def _validate(self) -> None:

@@ -93,8 +93,6 @@ def _accuracy_defaults(argv: list[str]) -> list[str]:
     for flag in ("--cot_backup", "--use_vllm"):
         if not given(flag):
             out.append(flag)
-    if not given("--model_max_length"):
-        out += ["--model_max_length", "2048"]
     if not given("--batch_size"):
         out += ["--batch_size", "8"]
     if not given("--dataset"):

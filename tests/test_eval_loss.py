@@ -51,11 +51,11 @@ def test_clean_gsm8k_solution():
 
 
 def test_gsm8k_dataset_renders_like_training(gsm8k_file, tokenizer):
-    data = load_gsm8k_test(gsm8k_file, tokenizer)
+    data = load_gsm8k_test(gsm8k_file, tokenizer, 512)
     assert len(data) == 6 and data.all_data_sources == ["gsm8k_test"]
     assert data.sources[0].endswith("### Response:") and "What is 0+0?" in data.sources[0]
     assert data.targets[1] == "1+1=2\nThe answer is 2" + tokenizer.eos_token
-    assert len(load_gsm8k_test(gsm8k_file, tokenizer, limit=2)) == 2
+    assert len(load_gsm8k_test(gsm8k_file, tokenizer, 512, limit=2)) == 2
 
 
 def test_split_holdout_is_deterministic_and_disjoint(dataset):
@@ -114,9 +114,9 @@ def test_evaluate_sets_restores_training_mode(phi, tokenizer, dataset):
 def test_build_eval_sets_validates(gsm8k_file, tokenizer, dataset):
     args = HeldoutEvalArguments(eval_loss_gsm8k_file=gsm8k_file)
     with pytest.raises(ValueError, match="holdout_size is 0"):
-        build_eval_sets(args, tokenizer, None)
+        build_eval_sets(args, tokenizer, None, 512)
     _, held = split_holdout(dataset, 5, seed=0)
-    sets = build_eval_sets(args, tokenizer, held, limit=2)
+    sets = build_eval_sets(args, tokenizer, held, 512, limit=2)
     assert {k: len(v) for k, v in sets.items()} == {"heldout": 2, "gsm8k": 2}
 
 
@@ -227,7 +227,7 @@ def test_holdout_keeps_the_questions_of_the_heldout_set_out_of_training(tokenize
             )
     path = tmp_path / "twins.jsonl"
     path.write_text("\n".join(json.dumps(r) for r in rows))
-    data = get_training_dataset([str(path)], tokenizer=tokenizer, max_seq_length=512)
+    data = get_training_dataset([str(path)], tokenizer=tokenizer, context_length=512)
     train, held = split_holdout(data, 10, seed=0)
     assert len(held) == 10 and len(train) == 70
     assert not {question_key(p) for p in held.sources} & {question_key(p) for p in train.sources}

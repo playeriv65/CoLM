@@ -23,13 +23,12 @@ PROFILES_FILE = os.path.join(
 DATACLASSES = (ModelArguments, DataArguments, TrainingArguments, HeldoutEvalArguments)
 
 
-def sequence_limit(model_args: ModelArguments, data_args: DataArguments) -> int:
-    """Tokens a training example may have: the context window of the model (or `max_seq_length`).
+def context_length(model_args: ModelArguments) -> int:
+    """Tokens a training example may have: the context window of the model.
 
-    Examples above it are dropped, never truncated (the upstream code cut every example at 512).
+    There is no option to set another limit. Examples above it are dropped (counted and logged
+    per source), never truncated: nothing in the code cuts a sequence.
     """
-    if data_args.max_seq_length:
-        return data_args.max_seq_length
     config = AutoConfig.from_pretrained(
         model_args.config_name or model_args.model_name_or_path, cache_dir=model_args.cache_dir
     )

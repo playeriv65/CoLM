@@ -192,6 +192,6 @@ def test_train_writes_the_resolved_config(tmp_path, tokenizer, mixture_file):
     assert resolved["training"]["max_steps"] == 1 and resolved["model"]["lora_r"] == 4
     derived = resolved["derived"]
     assert (
-        derived["max_seq_length"] == 512 and derived["selected_per_rank"] == 4
+        derived["context_length"] == 512 and derived["selected_per_rank"] == 4
     )  # phi context of the fixture
     assert derived["zo_parameters"] and derived["attn_implementation"] == "sdpa"

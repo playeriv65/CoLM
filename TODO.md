@@ -13,7 +13,7 @@ commit / result pointer, delete them once they are recorded in docs. Optimisatio
 
 - [ ] LoRA rank sweep: r in {8, 16} vs the paper's 128. **Blocked** until the refactor is merged;
       runs with the fixed code, i.e. with the fixes E4 (tokenisation, no
-      truncation), E8 (question-grouped held-out set) and E9 (eval scoring) in `docs/errors.md`.
+      truncation option exists), E8 (question-grouped held-out set) and E9 (eval scoring) in `docs/errors.md`.
       The queue was regenerated against the fixed code (`queues/rank-sweep-v2`, outputs in
       `out/rank-sweep-v2`); the pre-refactor queue `queues/rank-sweep` and `out/rank-sweep` (old
       tokenisation, holdout and scoring) must not be reused (deletion pending confirmation). The GPU is assigned by the user.

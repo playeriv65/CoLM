@@ -151,13 +151,17 @@ PROMPT_TEMPLATE_SINGLE = {
 }
 
 
+class PromptTooLong(ValueError):
+    """A prompt does not fit the context window of the model (prompts are never cut)."""
+
+
 def encode_prompt(
     task,
     template,
     train_samples,
     eval_sample,
     tokenizer,
-    max_length,
+    context_length,
     sfc=False,
     icl_sfc=False,
     generation=False,
@@ -169,7 +173,8 @@ def encode_prompt(
     Input:
     - task, template: task and template class
     - train_samples, eval_sample: demonstrations and the actual sample
-    - tokenizer, max_length: tokenizer and max length
+    - tokenizer, context_length: tokenizer and the context window of the model; a prompt above it
+      (minus `max_new_tokens` for generation tasks) raises `PromptTooLong`, it is never truncated
     - sfc: generate prompts for calibration (surface form competition; https://arxiv.org/abs/2104.08315)
     - icl_sfc: generate prompts for ICL version calibration
     - generation: whether it is an generation task
@@ -239,16 +244,14 @@ def encode_prompt(
     # Tokenize
     encodings = [tokenizer.encode(final_prompt) for final_prompt in final_prompts]
 
-    # Truncate (left truncate as demonstrations are less important)
-    if generation and max_new_tokens is not None:
-        max_length = max_length - max_new_tokens
-
-    if any([len(encoding) > max_length for encoding in encodings]):
-        logger.warn("Exceed max length")
-    if hasattr(tokenizer, "add_bos_token") and tokenizer.add_bos_token:
-        encodings = [encoding[0:1] + encoding[1:][-(max_length - 1) :] for encoding in encodings]
-    else:
-        encodings = [encoding[-max_length:] for encoding in encodings]
+    # Fail, never truncate: the caller drops the example (training) or stops (evaluation).
+    budget = context_length - ((max_new_tokens or 0) if generation else 0)
+    longest = max(len(encoding) for encoding in encodings)
+    if longest > budget:
+        raise PromptTooLong(
+            f"prompt of {longest} tokens does not fit the context window of {context_length} "
+            f"tokens (room for {budget})"
+        )
 
     return encodings, option_lens
 

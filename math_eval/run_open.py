@@ -37,7 +37,7 @@ STOP_TOKENS = [  # the model starting a new turn / prompt
     "Response:",
     "### Instruction",
 ]
-MAX_NEW_TOKENS = 1024
+DEFAULT_MAX_NEW_TOKENS = 1024
 REPO_OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "out")
 
 
@@ -58,7 +58,13 @@ def build_parser():
     parser.add_argument("--shots", default=0, type=int)
     parser.add_argument("--batch_size", default=8, type=int)
     parser.add_argument("--print", action="store_true", default=False)
-    parser.add_argument("--model_max_length", default=1024, type=int)
+    parser.add_argument(
+        "--max_new_tokens",
+        default=DEFAULT_MAX_NEW_TOKENS,
+        type=int,
+        help="Tokens generated per answer (vLLM `max_tokens` / HF `max_new_tokens`). Prompts are "
+        "never cut.",
+    )
     parser.add_argument("--cot_backup", action="store_true", default=False)
     parser.add_argument("--enable_lora", action="store_true", default=False)
     parser.add_argument(
@@ -139,7 +145,7 @@ class VllmGenerator:
         from vllm.lora.request import LoRARequest
 
         self.sampling_params = SamplingParams(
-            temperature=0, top_p=1, max_tokens=MAX_NEW_TOKENS, stop=STOP_TOKENS
+            temperature=0, top_p=1, max_tokens=args.max_new_tokens, stop=STOP_TOKENS
         )
         adapters = [m for m in args.model if is_adapter(m)]
         self.lora_requests = {
@@ -215,7 +221,7 @@ class HfGenerator:
             model=model,
             tokenizer=tokenizer,
             form=form,
-            max_length=self.args.model_max_length,
+            max_new_tokens=self.args.max_new_tokens,
         )
 
 
@@ -271,7 +277,7 @@ def output_path(args, model_path: str, dataset: str) -> str:
     if args.output:
         return args.output
     suffix = "PoT" if "pot" in args.stem_flan_type.lower() else "CoT"
-    filename = f"{dataset}_{args.shots}shots_{args.form}_length{args.model_max_length}"
+    filename = f"{dataset}_{args.shots}shots_{args.form}_new{args.max_new_tokens}"
     if args.cot_backup:
         filename += "_CoTBackup"
     filename += f"_bs{args.batch_size}_{suffix}_import"

@@ -115,6 +115,16 @@ the mean over all label tokens of the examples trained in the step (all ranks) w
 grouping. Peak GPU memory is measured on every rank and per phase (`memory.json`, `peak_mem_*` in
 the log).
 
+**No truncation.** No option cuts a sequence (`max_seq_length`, `model_max_length` and the
+SuperGLUE left-truncation are gone; the tokenisers are never called with `truncation=True`). The
+only limit is the context window of the model (`max_position_embeddings`, read from its config).
+An example above it is dropped and counted per source in the log (`Dropped N of M examples longer
+than L tokens`), in every data path: MathInstruct-style `instruction`/`output`, the LESS
+`prompt`/`completion` and `messages` formats, SuperGLUE training samples, the held-out and GSM8K
+eval-loss sets. Evaluation never cuts a prompt either (SuperGLUE raises
+`PromptTooLong` when a prompt does not fit; the accuracy evaluation has no cut at all). Memory is controlled only by how many whole examples
+go into one packed forward (`train_max_tokens`).
+
 **Known errors of the upstream code** are fixed (`docs/errors.md`, with the evidence). The
 alignment with the upstream behaviour was proven with a temporary `legacy` switch (float64 CPU
 goldens and a phi-2 GPU run); it has been removed again: the tag `pre-refactor` is the upstream
@@ -148,7 +158,8 @@ gsm8k math numglue svamp deepmind simuleq, the dtype of the model's recipe, LoRA
 colm-eval accuracy --model out/run/checkpoint-512 out/run/checkpoint-1024    # on CUDA_VISIBLE_DEVICES
 colm-eval accuracy --model microsoft/phi-2 --dataset gsm8k --limit 20 --dry_run   # prompts only
 ```
-Results: `<checkpoint>/outputs/<name>.jsonl` (+ `.metrics.json` with accuracy and counts); finished
+`--max_new_tokens` (default 1024) is the number of tokens generated per answer (vLLM `max_tokens`,
+HF `max_new_tokens`); prompts are never cut. Results: `<checkpoint>/outputs/<name>.jsonl` (+ `.metrics.json` with accuracy and counts); finished
 outputs are skipped on a rerun, partial ones (`.partial`) are recomputed.
 
 **Loss** (`colm-eval loss`, `colm/eval/eval_loss.py`): mean token NLL of teacher-forced reference
