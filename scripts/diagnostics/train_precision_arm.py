@@ -1,5 +1,7 @@
 """One short paired training run of the selection-precision study (`docs/selection-precision.md`).
 
+Diagnostic (kept because it documents a measurement, not part of the library). Result: docs/selection-precision.md.
+
 The recipe is the rank sweep's r=128 / alpha=512 arm (`configs/rank_sweep/sweep.json`: its base
 config, train overrides, environment and pinned flash kernel); only the steps, the evaluation
 steps, the seed and the selection arm differ:
@@ -13,7 +15,7 @@ steps, the seed and the selection arm differ:
     random_kept  the selector's structure with a random ranking: kept sources always trained,
             the other picks random inside each source with the selector's quotas
 
-    CUDA_VISIBLE_DEVICES=<gpu> python -u scripts/train_precision_arm.py --arm F --seed 0 \
+    CUDA_VISIBLE_DEVICES=<gpu> python -u scripts/diagnostics/train_precision_arm.py --arm F --seed 0 \
         --steps 300 --eval-steps 100 200 300 --out-root $COLM_ARTIFACT_ROOT/artifacts/CoLM/precision-DATE
 """
 
@@ -24,7 +26,7 @@ import sys
 import time
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 SWEEP = "configs/rank_sweep/sweep.json"
 # arm -> (selection_prefix_dtype, selection_prefix_fp32_tail); every arm pins both, whatever the
 # sweep and the model profile default to.

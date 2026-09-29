@@ -59,7 +59,13 @@ are no other launch scripts: do not add shell wrappers, extend the entry points.
   config), `training_arguments.py` / `model_arguments.py` / `data_arguments.py` — all options; the
   defaults are the paper recipe with the corrections of `docs/errors.md`.
 - `colm/data/` — datasets and collators (`get_training_dataset.py`, `superglue.py`, `holdout.py`,
-  `tasks.py`, `templates.py`); `colm/cli.py` — the entry points.
+  `tasks.py`, `templates.py`); `colm/cli.py` — the entry points. `TokenCountCache`
+  (`get_training_dataset.py`) keeps the per-example token counts that decide which examples fit
+  the context window (`--token_cache_dir`, default `cache/tokens`; key = hash of texts + context
+  limit + tokenizer; `cache` is an external link, see `external-paths.json`).
+- `colm/phases.py` + `colm/train/phase_callback.py` — one-shot wall-clock phases of a run,
+  saved as `<output_dir>/startup.json` (no synchronisation, nothing per step); wrap new start-up work
+  in `CLOCK.mark(...)` / `CLOCK.detail(...)`. Results: `docs/startup-overhead.md`.
 - `colm/eval/` — teacher-forced eval loss (`eval_loss.py`: sets, `evaluate_loss`, trainer callback,
   CLI); `colm/jobs/` — file queue + the single worker, sweep expansion (`rank_sweep.py`, specs in
   `configs/rank_sweep/`) and `summarize.py`. Queues live in the gitignored `queues/`. The worker
@@ -69,6 +75,9 @@ are no other launch scripts: do not add shell wrappers, extend the entry points.
 - `math_eval/` (vLLM / HF generation; `run_open.py` takes several models/datasets per process),
   `superglue_eval/` — evaluation code behind `colm-eval`.
 - `tests/equivalence/` — the tiny float64 Phi, tokenizer and data used by the tests.
+- `scripts/diagnostics/`, `configs/diagnostics/` — measurement scripts and their inputs; each script
+  header says what it measured and which document holds the result (`docs/README.md`). They are not
+  part of the library: nothing in `colm/` or the tests imports them (except `tests/test_precision_arms.py`).
 
 ## Rules
 
@@ -113,7 +122,7 @@ are no other launch scripts: do not add shell wrappers, extend the entry points.
 - The execution-only optimisations are done and are the code path (no switches): backlog, measured
   tables and the candidates left (O11-O13) are in `docs/optimization-backlog.md`. Keep them exact:
   `tests/test_opt.py` compares every one with the plain computation in float64 on CPU,
-  `scripts/check_opt.py` does the phi-2 teacher-forced comparison on a GPU (selection overlap
+  `scripts/diagnostics/check_opt.py` does the phi-2 teacher-forced comparison on a GPU (selection overlap
   against the fp32 noise floor, gradients against an exact fp32 reference).
 - fp32 gradient references use `sdpa_kernel(SDPBackend.MATH)`: the fp32 memory-efficient SDPA
   backward is ~0.3 off on phi-2 on this GPU (`docs/errors.md`).

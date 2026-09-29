@@ -1,5 +1,7 @@
 """Which operation of the attention branch of blocks 29 / 30 makes fp16 costly? (Phi-2)
 
+Diagnostic (kept because it documents a measurement, not part of the library). Result: docs/selection-precision.md.
+
 `measure_layer_sensitivity.py` found that fp16 in the attention branch of blocks 29 and 30 alone
 produces the fp16 error of g_i, the MLP branches and blocks 0-25 do not. This script keeps the
 whole prefix in fp32 and emulates fp16 storage at ONE place of ONE block (values rounded to fp16
@@ -10,7 +12,7 @@ and cast back, the arithmetic stays fp32):
     sdpa             q, k, v of the attention kernel (and its output) in fp16
     logits           statistics only: max |q k^T / sqrt(d)| of every block (fp32 run)
 
-    python -u scripts/measure_attention_ops.py ... (arguments of measure_layer_sensitivity.py)
+    python -u scripts/diagnostics/measure_attention_ops.py ... (arguments of measure_layer_sensitivity.py)
 """
 
 import json

@@ -1,5 +1,7 @@
 """Accuracy of g_i and the resulting selections, from the npz of `measure_selection_precision.py`.
 
+Diagnostic (kept because it documents a measurement, not part of the library). Result: docs/selection-precision.md.
+
 CPU only. Prints markdown tables and writes `analysis.json` next to the input.
 
 * g_i tables: every arm against the reference R (exact float64 directional derivative) pooled over

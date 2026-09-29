@@ -1,12 +1,14 @@
 """Per-example MeZO scalars g_i under different selection precisions, on saved pools.
 
-Arms (see `scripts/precision_arms.py`): R exact float64 reference; F fp32; P fp16 prefix + fp32
+Diagnostic (kept because it documents a measurement, not part of the library). Result: docs/selection-precision.md.
+
+Arms (see `scripts/diagnostics/precision_arms.py`): R exact float64 reference; F fp32; P fp16 prefix + fp32
 suffix; H fp16 prefix and suffix; `L` = the library extractor (`MezoEfficient`) with `--library-tail K` fp32 tail blocks (only with that flag); suffix `r` = the pool packed in reverse order (packing-noise
 floor / run-to-run noise); `_e2` = epsilon 1e-2. `Rfd3` / `Rfd2` are float64 finite differences at
 eps 1e-3 / 1e-2 (the bias of the estimator itself). Output: one npz with g[arm] of shape
 [directions, examples], the directions z, the example bookkeeping and the environment.
 
-    python -u scripts/measure_selection_precision.py --config configs/prefix_precision_phi2.json \
+    python -u scripts/diagnostics/measure_selection_precision.py --config configs/diagnostics/prefix_precision_phi2.json \
         --pool-file $ROOT/inputs/pools.pkl --adapter $ROOT/inputs/adapter_model.safetensors \
         --out-dir $COLM_ARTIFACT_ROOT/artifacts/CoLM/precision-DATE
     ... --validate          # shortcut check: R against an all-float64 finite difference

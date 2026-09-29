@@ -1,16 +1,18 @@
 """Hybrid prefix Pk: fp16 layers 0..30-k, fp32 layers 31-k..30, fp32 perturbed last layer.
 
+Diagnostic (kept because it documents a measurement, not part of the library). Result: docs/selection-precision.md.
+
 k = 0 is P (fp16 prefix), k = 31 is F (fp32 prefix). Measures, on the data of the Phase 1 run
 (`measure_selection_precision.py`, whose R and F arrays are reused): g_i for every k, and the time
 of the selection forward (prefix, prefix + the two suffix replays of one direction) on the
 examples the trainer actually forwards (`CoresetSelector.needed`), packed in 1536-token packs,
 warm, CUDA-synchronised, one job on the GPU.
 
-    python -u scripts/measure_hybrid_prefix.py --config configs/prefix_precision_phi2.json \
+    python -u scripts/diagnostics/measure_hybrid_prefix.py --config configs/diagnostics/prefix_precision_phi2.json \
         --pool-file $ROOT/inputs/pools.pkl --adapter $ROOT/inputs/adapter_model.safetensors \
         --phase1 $OUT/measure/g.npz --out-dir $OUT/hybrid
-    python scripts/analyze_selection_precision.py $OUT/hybrid/g.npz --arms P0,P1,... --pairs ...
-    python scripts/measure_hybrid_prefix.py --table $OUT/hybrid/analysis.json $OUT/hybrid/timing.json
+    python scripts/diagnostics/analyze_selection_precision.py $OUT/hybrid/g.npz --arms P0,P1,... --pairs ...
+    python scripts/diagnostics/measure_hybrid_prefix.py --table $OUT/hybrid/analysis.json $OUT/hybrid/timing.json
 """
 
 import argparse

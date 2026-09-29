@@ -23,10 +23,11 @@ steps, GPU 2). Severity: **R** changes results, **M** changes memory / time only
 | E7 (M/R) | The selected list `[kept..., class-0 picks, ...]` is cut into contiguous per-rank slices. | 2-rank run: rank 0 trains 75% kept-source examples, rank 1 37.5%. | Round-robin: every rank gets the same mixture. |
 | E8 (R, eval) | The held-out set is drawn by row. | 20% of MathInstruct rows share their question with another row (CoT and PoT solutions, several sources): **21%** of a random held-out set have their question in the training part. | Whole groups of the same question are held out (`colm/data/holdout.py`). |
 | E9 (R, eval) | Ground truths of numglue / simuleq / deepmind are not normalised like the predictions; `round(p) == gt` and a 4% tolerance count wrong answers; the article "a" is read as option A; bare stop words (`Question`, `Response`, ...) cut generations. | **139 of 1000** deepmind answers could never be matched by a perfect model (`1363.0`, `[3]`, ...). | Normalised ground truths (24 unreachable remain: several answers in one, algebra), numeric equality up to 1e-6, letters only as capitals, stop strings with their colon. |
-| E12 (R, resume) | The Adam moments of the selection are not in the checkpoints; a resumed run restarts them with a step count that assumes they exist. | Derivation. | `CoresetSelector.state_dict()`; `load_state_dict()`. |
+| E12 (R, resume) | The Adam moments of the selection are not in the checkpoints; a resumed run restarts them with a step count that assumes they exist. | Derivation. | `CoresetSelector.state_dict()` / `load_state_dict()` exist, but **nothing saves or restores them yet** (no trainer or callback calls them, no test): a resumed run still restarts the moments. Wiring is open in `TODO.md`. |
 | E13 (R, noise) | `rep` and `length_loss_weighted` extract features with dropout on. `rep` also computes an unused loss over all positions. | Read. | Eval mode; no loss. |
 | E14 (R) | Scalar features are stored in the AMP dtype; their squares overflow fp16 above 255. | Derivation. | float32. |
 | E16 (R) | The SuperGLUE option / candidate is counted back from the padded width, so shorter examples lose option tokens. | `tests/test_superglue.py`. | Counted from the real length. |
+| E17 (R, eval) | `sample_subset(num=-1)` (the whole validation split) drops the last sample of the shuffled order (`index[:num]` with `num=-1`). | `colm-eval superglue` scored CB on 55 of 56, RTE on 276 of 277 examples. | Every sample is returned (`tests/test_superglue.py`). |
 | MG (R) | `masked_grad` scales the per-example gradient by 1 / (selected examples of the rank), while the real gradient is the mean over all ranks. | Off by the number of GPUs. | 1 / (selected per rank x ranks). |
 
 Not an error, kept: the algorithm of the selection (E1). One fixed random direction z makes every
@@ -58,7 +59,7 @@ contexts on foreign GPUs; the KV cache of the selection forward was copied.
 
 phi-2, 1 GPU, 20 steps, allocated peak: legacy 26.4 GB (training) / 13.6 GB (selection); default
 22.2 GB in the first steps, 32.3 GB over the run (the longest examples are no longer cut); worst
-case, packs of 2048-token examples (`scripts/memory_worst_case.py`): **47.1 GB** for a training
+case, packs of 2048-token examples (`scripts/diagnostics/memory_worst_case.py`): **47.1 GB** for a training
 forward of 2 examples, 12.8 GB for a selection forward of 4. Step time 2.1 s against 2.7 s.
 
 fp16 attention: the fp32 packed selection forward equals the stock sdpa forward to 5e-6; the fp16

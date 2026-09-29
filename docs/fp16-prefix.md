@@ -93,7 +93,7 @@ The rerun's raw JSON and logs are under
 
 ## One full-step timing run
 
-Physical GPU 2, one rank; `configs/timing_phi2_efficient.json` with
+Physical GPU 2, one rank; `configs/diagnostics/timing_phi2_efficient.json` with
 `selection_prefix_dtype=float16`, 130 steps, 10 warm-up steps and 120 measured
 steps, fine timing and transfer census in the warm-up only. Other resolved
 parameters include pool 32, train 16, micro-batch 4, selection pack budget
@@ -127,8 +127,8 @@ The numerical check can be reproduced from the saved adapter and pool:
 
 ```bash
 ROOT="$COLM_ARTIFACT_ROOT/artifacts/CoLM/layer-signal-20260928"
-python -u scripts/check_prefix_precision.py \
-  --config configs/prefix_precision_phi2.json \
+python -u scripts/diagnostics/check_prefix_precision.py \
+  --config configs/diagnostics/prefix_precision_phi2.json \
   --pool-file "$ROOT/inputs/pools.pkl" \
   --adapter "$ROOT/inputs/adapter_model.safetensors" \
   --out "$COLM_ARTIFACT_ROOT/artifacts/CoLM/fp16-prefix-check.json" \
@@ -180,7 +180,7 @@ data-derived budget. Raw config, step JSONL, memory, and logs are under
 appeared on the card during the run, so timings below are not exclusive.
 
 Accuracy through the library path (`MezoEfficient` with `selection_prefix_fp32_tail=2`, not the
-script-local arm): `scripts/measure_selection_precision.py --pools 8 --directions 3
+script-local arm): `scripts/diagnostics/measure_selection_precision.py --pools 8 --directions 3
 --library-tail 2` (256 examples x 3 directions = 768 values of g_i, the adapter and pools of
 `docs/layer-signal.md`, TF32 off, eps 1e-3, 1536-token packs) against the exact float64
 derivative R:

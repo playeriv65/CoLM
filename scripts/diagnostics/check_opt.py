@@ -1,7 +1,9 @@
 #!/usr/bin/env python
 """Teacher-forced GPU check of the execution-only step optimisations against the plain path.
 
-    python -u scripts/check_opt.py <config.json> <out.json> [key=value ...] [--steps N]
+Diagnostic (kept because it documents a measurement, not part of the library). Result: docs/optimization-backlog.md ("Checks on the GPU").
+
+    python -u scripts/diagnostics/check_opt.py <config.json> <out.json> [key=value ...] [--steps N]
 
 Runs `colm.train.train.main` on the optimised trainer (training continues on its own selections).
 At every step, on the same weights, pool and selection state, it computes

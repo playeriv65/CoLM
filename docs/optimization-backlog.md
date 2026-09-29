@@ -109,12 +109,12 @@ Per rank: 32 examples forwarded for selection, 16 trained (8 micro-batches of 2)
 
 ## Measured baseline (2026-09-28, commit of `profile_timing`)
 
-`configs/timing_phi2_efficient.json` (the default config above, 130 steps, `profile_timing=fine`,
+`configs/diagnostics/timing_phi2_efficient.json` (the default config above, 130 steps, `profile_timing=fine`,
 census on steps 1–10), 1× RTX PRO 6000 Blackwell, torch 2.13 cu130,
 transformers 5.17. Means over steps 11–130 (120 steps); 50-step sliding mean within ±1.5% of the
 window mean; loadavg 12.1 at start, 19.4 at end. Top-level residual vs the step clock: 2.6 ms
 (0.09%). Fine timers synchronise at every section boundary (per layer). Instrumentation overhead,
-from `configs/timing_phi2_efficient_coarse.json` (coarse timers only, 60 steps, same seed and so
+from `configs/diagnostics/timing_phi2_efficient_coarse.json` (coarse timers only, 60 steps, same seed and so
 the same batches) over steps 11–60: step 2866 vs 2836 ms (+1.1%), selection 1867 vs 1841 ms
 (+1.4%), prefix forward +1.6%, training +0.4%; below 5%, so the fine run's numbers stand.
 
@@ -183,7 +183,7 @@ What changed and its exactness class (code in `colm/selection/`, `colm/train/tra
 | H | Label geometry (positions, targets, segment, counts) computed on the CPU in `pack` (no `nonzero` / `bincount` synchronisation in the losses); `ModeSwitch`: flat flag pass instead of the recursive `train()` walk (4 ms -> 0.3 ms per switch, PreTrainedModel's override is skipped only while `use_kernels` is off); `dataloader_num_workers=1` (tokenising the next pool overlaps the step: 11.5 ms); the unused pool norm of `mezo_transform=none` is no longer computed; `_features` casts to at least fp32 (float64 stays). | bitwise / host only | worker: same pools (test); mode switch: same flags on all modules (test); the census below. |
 | O11 | not done (per-architecture layer replay). | | |
 
-### Measured (phi-2, `configs/timing_phi2_efficient.json`)
+### Measured (phi-2, `configs/diagnostics/timing_phi2_efficient.json`)
 
 Protocol: `--profile_timing fine`, 130 steps, 10 warm-up dropped, means over steps 11-130, closure
 against the step wall clock, 50-step sliding mean, W&B off, no GPU sampling, physical GPU 0 alone
@@ -232,7 +232,7 @@ Training pack budget (`train_max_tokens`; replaces the former memory-derived bud
 phi-2, default recipe, physical GPU 0 (one job on the card, loadavg 15-25 from other users), 60 steps,
 step time = mean of `step_time_s` over steps 11-60 (`profile_timing=off`), memory from `MemoryMeter`
 (peak of the training phase over the 60 steps), one run each, same pools. Worst case: 2 selected
-examples of 2048 tokens (`scripts/memory_worst_case.py --train_examples 2`, forward + backward of
+examples of 2048 tokens (`scripts/diagnostics/memory_worst_case.py --train_examples 2`, forward + backward of
 every pack, no optimizer step):
 
 | `train_max_tokens` | step (ms) | vs unlimited | peak allocated | reserved | worst case 2 x 2048 (packs, allocated) | mean loss, 60 steps |
@@ -270,7 +270,7 @@ Raw logs (machine-local, not in git): `logs/opt-2026-09-28/` of the main worktre
 (fine-timing jsonl and summaries of both columns, the `off` runs' trainer states and memory,
 the GPU check).
 
-### Checks on the GPU (phi-2, teacher forced, `scripts/check_opt.py`)
+### Checks on the GPU (phi-2, teacher forced, `scripts/diagnostics/check_opt.py`)
 
 20 steps on GPU 2 (shared with another job, packs of ~1k tokens),
 at every step from the same weights, pool and selector state: the plain path (all features, pack
@@ -327,7 +327,7 @@ computation changes (precision recipe unchanged: fp16 autocast training, fp32 se
   from the fp32 gradient; hub kernel and torch `varlen_attn` agree to 1e-5 at the operator level;
   fwd + bwd of one layer 0.67 / 0.76 / 0.83 ms (hub) against 0.47 / 0.52 / 0.85 ms (torch) for
   16 x 220 / 4 sequences of 300-500 / 2 x 2048 tokens).
-- **Step time** (phi-2, `configs/timing_phi2_efficient.json`, 70 steps, steps 11-70, `--profile_timing
+- **Step time** (phi-2, `configs/diagnostics/timing_phi2_efficient.json`, 70 steps, steps 11-70, `--profile_timing
   fine`, physical GPU 0 alone, same seed = same pools, loadavg 22-35 from other users, one run each):
 
 | ms / optimizer step | `colm_varlen` (varlen_attn train, efficient kernel selection) | stock (flash_attention_2 train, sdpa selection) |

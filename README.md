@@ -13,6 +13,7 @@ This repository is the official implementation of our ICLR 2025 paper [Mini-batc
   - [Data Preparation](#data-preparation)
   - [Quickstart](#quickstart)
   - [Evaluation](#evaluation)
+  - [Documentation](#documentation)
   - [Tests](#tests)
   - [Bugs or Questions?](#bugs-or-questions)
   - [Citation](#citation)
@@ -62,10 +63,11 @@ Download MathInstruct with the additional annotations
 [here](https://drive.google.com/file/d/1kpYMJ0xrn0eLyv-uwhUZCTjFWT6Zlb-Q/view?usp=sharing)
 (e.g. `uvx gdown 1kpYMJ0xrn0eLyv-uwhUZCTjFWT6Zlb-Q`) into the shared data directory and link it:
 ```bash
-bash scripts/link-external.sh    # data -> $COLM_ARTIFACT_ROOT/datasets/colm, out -> .../artifacts/CoLM/out
+bash scripts/link-external.sh    # data -> $COLM_ARTIFACT_ROOT/datasets/colm, out and cache -> .../artifacts/CoLM/
 ```
 The linked paths are declared in `external-paths.json` (`COLM_ARTIFACT_ROOT` defaults to
-`/mnt/data2/zelin4593`). Configs read `data/MathInstruct.jsonl`.
+`/mnt/data2/zelin4593`). Configs read `data/MathInstruct.jsonl`. `cache/tokens` holds the token-count
+cache (below); it is rebuilt when missing.
 
 ## Quickstart
 Three commands (installed by `uv sync`), each with `--help`:
@@ -97,13 +99,6 @@ configuration (defaults included) is printed at the start and saved as
 `<output_dir>/resolved_config.json`. Runs without `output_dir` go to
 `out/<model>-<data>-lora-gas..-bs..-<method>-<unit>-...-<steps>steps-seed<seed>`.
 
-```
-before  configs/math_phi2_efficient.json    {"model_name_or_path": "microsoft/phi-2", "train_files": ["data/MathInstruct.jsonl"],
-                                             "max_steps": 1024, "per_device_train_batch_size": 4, "gradient_accumulation_steps": 8,
-                                             "efficient_mezo": true}      scripts/run_math_efficient.sh 2,3
-after   configs/math_phi2_efficient.json    {"model_name_or_path": "microsoft/phi-2"}      colm-train configs/math_phi2_efficient.json --gpus 2,3
-```
-
 **What a step does** (`colm/train/trainers.py`, `colm/selection/`): the pool of all ranks (one HF
 batch per rank, packed without padding) is gathered on every rank and `CoresetSelector.needed`
 decides from the source ids which features can influence the selection: examples of `keep_sources`
@@ -114,8 +109,9 @@ with one fixed direction z, so each rank sends one scalar per example and rank 0
 features. Facility location picks `small_batch_ratio` of the pool source by source, the picks are
 broadcast and every rank trains on its share, in packed forwards chosen by `train_max_tokens`:
 N > 0 (memory mode, default 1536) packs the examples greedily into forwards of at most N tokens and
-accumulates the gradients (phi-2: 1382 ms per step, 32.3 GB peak); `0` (speed mode) puts the whole
-step into one forward (1383 ms, i.e. no faster on phi-2, but 57 GB peak / 94 GB reserved; table in
+accumulates the gradients (phi-2, default recipe: 0.89 s per step, 32.0 GB peak training memory,
+`docs/startup-overhead.md`); `0` (speed mode) puts the whole step into one forward (no faster on
+phi-2, but 57 GB peak / 94 GB reserved; measured with the FP32 prefix, table in
 `docs/optimization-backlog.md`). The loss of a step is
 the mean over all label tokens of the examples trained in the step (all ranks) whatever the
 grouping. Peak GPU memory is measured on every rank and per phase (`memory.json`, `peak_mem_*` in
@@ -136,6 +132,17 @@ alignment with the upstream behaviour was proven with a temporary `legacy` switc
 goldens and a phi-2 GPU run); it has been removed again: the tag `pre-refactor` is the upstream
 code, `legacy-bridge` the last commit that still has the switch and its tests.
 
+### Start-up cost and the token cache
+Deciding which of the 262k MathInstruct examples fit the context window needs their token counts;
+tokenising them took ~30 s (minutes on a loaded host) in every training run and in every standalone
+`colm-eval loss`. The counts are now cached in `--token_cache_dir` (default `cache/tokens`, empty
+disables): the file name is a hash of the texts (data file, prompt template, EOS, sampling), the
+context limit and the tokenizer, so any change of them reads another file, and the result is
+identical to the uncached path (`tests/test_token_cache.py`). Every run writes `startup.json` (next to
+`memory.json`) with the wall clock of each phase (imports, config, model load, data, first step,
+steady steps, evaluation, checkpoints, final save) and prints the wall clock of the whole launch;
+the measured table is in [`docs/startup-overhead.md`](docs/startup-overhead.md).
+
 ### Step timing
 `--profile_timing coarse|fine` (default `off`: no synchronize, no overhead) writes a per-phase
 wall-clock breakdown of every optimizer step to
@@ -148,8 +155,8 @@ Summarise with
 python -m colm.train.step_timing logs/step_timing-....jsonl --warmup 10   # table + .summary.json
 ```
 Every parent node is reported with an explicit `other` residual; the root is the measured time
-between consecutive optimizer steps. Configs: `configs/timing_phi2_efficient.json` (fine, 130 steps)
-and `configs/timing_phi2_efficient_coarse.json` (coarse, 60 steps).
+between consecutive optimizer steps. Configs: `configs/diagnostics/timing_phi2_efficient.json` (fine, 130 steps)
+and `configs/diagnostics/timing_phi2_efficient_coarse.json` (coarse, 60 steps).
 
 Note: CoLM introduces overhead besides the selection forward: gathering features and examples,
 broadcasting the selected indices, host/device transfers. In the paper we report the ideal
@@ -196,6 +203,10 @@ colm-sweep work --queue queues/rank-sweep-v5 --gpu 0              # run (the GPU
 colm-sweep summary --sweep configs/rank_sweep/sweep.json       # out/rank-sweep-v5/summary.md
 ```
 Design, arms and timing: `TODO.md` ("LoRA rank sweep").
+
+## Documentation
+`docs/README.md` says which document answers what (upstream errors, optimisation backlog, FP16 selection
+prefix, selection precision, start-up cost). `TODO.md` is the short current task list.
 
 ## Tests
 ```bash

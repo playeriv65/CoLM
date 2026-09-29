@@ -1,5 +1,7 @@
 """Compare fp16-prefix/fp32-suffix MeZO differences with an fp32 prefix.
 
+Diagnostic (kept because it documents a measurement, not part of the library). Result: docs/fp16-prefix.md ("Numerical check").
+
 The inputs and adapter come from the saved layer-signal diagnostic. Each arm
 uses the same packed examples, weights, directions, and fp32 suffix/loss.
 """

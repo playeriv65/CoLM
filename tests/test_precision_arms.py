@@ -1,4 +1,4 @@
-"""CPU checks of the selection-precision measurement helpers (`scripts/precision_arms.py`)."""
+"""CPU checks of the selection-precision measurement helpers (`scripts/diagnostics/precision_arms.py`)."""
 
 import sys
 from pathlib import Path
@@ -9,7 +9,7 @@ import pytest
 import torch
 from equivalence.fixtures import model_fp64
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "diagnostics"))
 import precision_arms as arms  # noqa: E402
 
 from colm.data.get_training_dataset import get_training_dataset, tokenize_examples  # noqa: E402

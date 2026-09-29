@@ -1,6 +1,8 @@
-"""Markdown table of the paired runs written by `scripts/train_precision_arm.py`.
+"""Markdown table of the paired runs written by `scripts/diagnostics/train_precision_arm.py`.
 
-    python scripts/summarize_precision_runs.py $ROOT/F-seed0-300steps $ROOT/F-seed1-300steps ...
+Diagnostic (kept because it documents a measurement, not part of the library). Result: docs/selection-precision.md.
+
+    python scripts/diagnostics/summarize_precision_runs.py $ROOT/F-seed0-300steps $ROOT/F-seed1-300steps ...
 
 Per run: held-out and GSM8K loss at every evaluation step, mean train loss of the last 100 steps,
 mean step time (steps after the first 10), peak memory, load average.

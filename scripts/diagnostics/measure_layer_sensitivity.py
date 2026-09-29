@@ -1,5 +1,7 @@
 """Why do the last prefix blocks dominate the fp16 error of g_i? (Phi-2, `docs/selection-precision.md`)
 
+Diagnostic (kept because it documents a measurement, not part of the library). Result: docs/selection-precision.md.
+
 Four measurements on the Phase 1 data (adapter, pools, directions; the exact reference R comes
 from the Phase 1 npz):
 
@@ -13,7 +15,7 @@ from the Phase 1 npz):
 4. `noise`: g_i error when the fp32 hidden state at the input of block m (31, 30, 29) gets a
    relative Gaussian perturbation (1e-3, elementwise and per-token-norm scaled).
 
-    python -u scripts/measure_layer_sensitivity.py --config ... --pool-file ... --adapter ... \
+    python -u scripts/diagnostics/measure_layer_sensitivity.py --config ... --pool-file ... --adapter ... \
         --phase1 $OUT/measure/g.npz --out-dir $OUT/sensitivity
 """
 

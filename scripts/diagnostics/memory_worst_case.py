@@ -1,6 +1,8 @@
 """Peak GPU memory of the worst-case selection and training forwards of a run.
 
-    CUDA_VISIBLE_DEVICES=<gpu> uv run python scripts/memory_worst_case.py configs/math_phi2_efficient.json
+Diagnostic (kept because it documents a measurement, not part of the library). Result: docs/errors.md ("Memory and precision") and docs/optimization-backlog.md.
+
+    CUDA_VISIBLE_DEVICES=<gpu> uv run python scripts/diagnostics/memory_worst_case.py configs/math_phi2_efficient.json
 
 Builds the model of the config (as train.py does), then runs one selection forward (the MeZO
 estimate) and one forward + backward of the training step on packs of maximum-length examples

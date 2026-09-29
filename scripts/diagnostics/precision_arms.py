@@ -1,5 +1,7 @@
 """Precision arms of the MeZO selection forward: measurement helpers (not library code).
 
+Diagnostic (kept because it documents a measurement, not part of the library). Result: docs/selection-precision.md.
+
 The library computes the projected gradient g_i of every example as
 
     g_i = (L_i(B + eps z) - L_i(B - eps z)) / (2 eps)
@@ -17,7 +19,7 @@ from one shared prefix:
 * `R`  reference: the fp32 prefix state promoted to float64, then the last layer, final norm, head
   and loss in float64 and the EXACT directional derivative d/dt L_i(B + t z) at t = 0 (forward-mode
   autodiff, no finite difference). The prefix rounding is common to L+ and L-, so it does not
-  enter g_i at the level that matters here; `scripts/measure_selection_precision.py --validate`
+  enter g_i at the level that matters here; `scripts/diagnostics/measure_selection_precision.py --validate`
   checks that shortcut against an all-float64 finite difference.
 """
 

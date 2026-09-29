@@ -6,10 +6,10 @@ selection or the learning compared with full fp32 (F), and how does the upstream
 regime (H) behave. The study itself changed no default; its recommendation was then decided by the
 user (see "Decision", 2026-09-29: the fp32 tail of 2 blocks is now the Phi-2 default).
 
-Scripts: `scripts/precision_arms.py` (arms), `scripts/measure_selection_precision.py` (g_i),
-`scripts/analyze_selection_precision.py` (tables, selection), `scripts/train_precision_arm.py` (arms F, P, P2, H, random) and
-`scripts/summarize_precision_runs.py` (paired learning runs), `scripts/measure_hybrid_prefix.py`
-(fp32-tail hybrid prefix), `scripts/measure_layer_sensitivity.py` and `scripts/measure_attention_ops.py`
+Scripts: `scripts/diagnostics/precision_arms.py` (arms), `scripts/diagnostics/measure_selection_precision.py` (g_i),
+`scripts/diagnostics/analyze_selection_precision.py` (tables, selection), `scripts/diagnostics/train_precision_arm.py` (arms F, P, P2, H, random) and
+`scripts/diagnostics/summarize_precision_runs.py` (paired learning runs), `scripts/diagnostics/measure_hybrid_prefix.py`
+(fp32-tail hybrid prefix), `scripts/diagnostics/measure_layer_sensitivity.py` and `scripts/diagnostics/measure_attention_ops.py`
 (why the last blocks); CPU tests in
 `tests/test_precision_arms.py`; the library option is `selection_prefix_fp32_tail`
 (`tests/test_fp32_tail.py`). Raw data (npz, logs, run directories) are outside git under
@@ -122,7 +122,7 @@ before its final report; its per-arm tables exist, an aggregate write-up does no
 ## Phase 2: learning
 
 300 steps instead of the sweep's 1024 (user's time budget), otherwise the rank sweep's r=128 /
-alpha=512 arm (`scripts/train_precision_arm.py` builds the config from
+alpha=512 arm (`scripts/diagnostics/train_precision_arm.py` builds the config from
 `configs/rank_sweep/sweep.json`: holdout 1000, pool 32, 16 trained, 1536-token packs, lr 2e-5
 linear, fp16 AMP, `selection_prefix_dtype` per arm), single GPU 2, W&B off. Held-out (1000
 MathInstruct examples) and GSM8K-solution token-pooled loss at steps 100, 200, 300 (the rank
@@ -148,7 +148,7 @@ selected examples, so it reflects which examples were picked (kept-source and sh
 much as the model and is not a quality measure across selectors; the held-out and GSM8K losses are.
 
 Random baselines, exactly as set (script-local patches of `MezoEfficient.extract` and
-`CoresetSelector.__call__` in `scripts/precision_arms.py`, no library change; the MeZO forward is
+`CoresetSelector.__call__` in `scripts/diagnostics/precision_arms.py`, no library change; the MeZO forward is
 skipped): `random` chooses 16 of the 32 pool examples uniformly (numpy generator, seed 20260929) and
 ignores `keep_sources`; `random, kept sources always` keeps the selector's structure: all
 kept-source examples (8.75 of 16 on average) are trained and the other picks are drawn uniformly
@@ -186,7 +186,7 @@ multi-seed comparison could still show a small effect of the ranking.
 Arm Pk: layers 0 ... 30-k under fp16 autocast, then the last k layers of the prefix (31-k ... 30)
 in fp32 without autocast (a forward pre-hook on layer 31-k casts the hidden state, position
 embeddings and masks to fp32 and disables autocast until the prefix stops); the perturbed last
-layer, head and loss stay fp32. k = 0 is P, k = 31 is F. `scripts/measure_hybrid_prefix.py`, same
+layer, head and loss stay fp32. k = 0 is P, k = 31 is F. `scripts/diagnostics/measure_hybrid_prefix.py`, same
 adapter, 16 pools and five directions as Phase 1 (R and F arrays reused). Endpoint check on one
 pack: the prefix hidden state of k = 0 / k = 31 equals the P / F prefix bitwise (max difference
 0.0); g differs by <= 1.2e-4 absolute between two evaluations of identical states (the fp32 noise
@@ -220,7 +220,7 @@ Learning was not measured for Pk.
 
 ## Why the last two blocks
 
-`scripts/measure_layer_sensitivity.py` and `scripts/measure_attention_ops.py`: 8 pools (256
+`scripts/diagnostics/measure_layer_sensitivity.py` and `scripts/diagnostics/measure_attention_ops.py`: 8 pools (256
 examples) x 3 directions = 768 values per row, error against R, everything fp32 except the named
 place (fp16 autocast, or values rounded to fp16 and cast back with the arithmetic in fp32). The
 all-fp32 row is 0.14 % median error, the all-fp16 (P) row 20.3 % (44 sign flips).
@@ -343,20 +343,20 @@ study exist).
 ```bash
 ROOT="$COLM_ARTIFACT_ROOT/artifacts/CoLM/layer-signal-20260928"
 OUT="$COLM_ARTIFACT_ROOT/artifacts/CoLM/precision-DATE"
-CUDA_VISIBLE_DEVICES=<gpu> python -u scripts/measure_selection_precision.py \
-  --config configs/prefix_precision_phi2.json --pool-file "$ROOT/inputs/pools.pkl" \
+CUDA_VISIBLE_DEVICES=<gpu> python -u scripts/diagnostics/measure_selection_precision.py \
+  --config configs/diagnostics/prefix_precision_phi2.json --pool-file "$ROOT/inputs/pools.pkl" \
   --adapter "$ROOT/inputs/adapter_model.safetensors" --out-dir "$OUT/measure"   # ~28 min
-CUDA_VISIBLE_DEVICES="" python scripts/analyze_selection_precision.py "$OUT/measure/g.npz"
-CUDA_VISIBLE_DEVICES=<gpu> python -u scripts/train_precision_arm.py --arm {F,P,H,random} \
+CUDA_VISIBLE_DEVICES="" python scripts/diagnostics/analyze_selection_precision.py "$OUT/measure/g.npz"
+CUDA_VISIBLE_DEVICES=<gpu> python -u scripts/diagnostics/train_precision_arm.py --arm {F,P,H,random} \
   --seed 0 --steps 300 --eval-steps 100 200 300 --out-root "$OUT/train"
-python scripts/summarize_precision_runs.py "$OUT"/train/*
-CUDA_VISIBLE_DEVICES=<gpu> python -u scripts/measure_hybrid_prefix.py \
-  --config configs/prefix_precision_phi2.json --pool-file "$ROOT/inputs/pools.pkl" \
+python scripts/diagnostics/summarize_precision_runs.py "$OUT"/train/*
+CUDA_VISIBLE_DEVICES=<gpu> python -u scripts/diagnostics/measure_hybrid_prefix.py \
+  --config configs/diagnostics/prefix_precision_phi2.json --pool-file "$ROOT/inputs/pools.pkl" \
   --adapter "$ROOT/inputs/adapter_model.safetensors" --phase1 "$OUT/measure/g.npz" \
   --out-dir "$OUT/hybrid"                                                       # ~5 min
-python scripts/analyze_selection_precision.py "$OUT/hybrid/g.npz" --arms F,P0,P1,P2,P4,P8,P16,P31 \
+python scripts/diagnostics/analyze_selection_precision.py "$OUT/hybrid/g.npz" --arms F,P0,P1,P2,P4,P8,P16,P31 \
   --pairs P1:P0,P2:P0,P4:P0,P8:P0,P16:P0,P31:P0,P31:F --out "$OUT/hybrid/analysis.json"
-python scripts/measure_hybrid_prefix.py --table "$OUT/hybrid/analysis.json" "$OUT/hybrid/timing.json"
+python scripts/diagnostics/measure_hybrid_prefix.py --table "$OUT/hybrid/analysis.json" "$OUT/hybrid/timing.json"
 ```
 
 The library option (`selection_prefix_fp32_tail`, the shipped default k = 2) is checked through
