@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 import torch
+import torch.nn.functional as F
 from conftest import make_phi
 
 from colm.data.get_training_dataset import SupervisedCollator, get_training_dataset
@@ -18,6 +19,7 @@ from colm.eval.eval_loss import (
     clean_gsm8k_solution,
     evaluate_loss,
     evaluate_sets,
+    label_nll,
     load_gsm8k_test,
 )
 
@@ -103,6 +105,32 @@ def test_evaluate_loss_matches_per_example_hf_loss(phi, tokenizer, dataset):
     assert pooled["loss"] == pytest.approx(total / count, rel=1e-4)
     assert set(pooled["per_source"]) == set(subset.all_data_sources)
     assert pooled["perplexity"] == pytest.approx(torch.exp(torch.tensor(pooled["loss"])).item())
+
+
+def test_label_position_loss_equals_full_logits_loss(phi, tokenizer, dataset):
+    """Head at label positions only == cross-entropy of the full logits, on a padded batch."""
+    subset = select_examples(dataset, range(6))
+    batch = SupervisedCollator(tokenizer)([subset[i] for i in range(6)])
+    input_ids, attention_mask, labels = (
+        batch["input_ids"],
+        batch["attention_mask"],
+        batch["labels"],
+    )
+    assert not attention_mask.all(), "the batch must contain padding"
+    phi.eval()
+    with torch.no_grad():
+        logits = phi(input_ids=input_ids, attention_mask=attention_mask).logits
+        targets = labels[:, 1:]
+        full = F.cross_entropy(
+            logits[:, :-1].float().reshape(-1, logits.shape[-1]),
+            targets.reshape(-1),
+            ignore_index=-100,
+            reduction="none",
+        ).view_as(targets)
+        nll, count = label_nll(phi, input_ids, attention_mask, labels)
+    assert torch.equal(count, (targets != -100).sum(dim=1))
+    assert (count > 0).all() and (count < targets.shape[1]).any()
+    torch.testing.assert_close(nll, full.sum(dim=1).double(), rtol=1e-5, atol=1e-6)
 
 
 def test_evaluate_sets_restores_training_mode(phi, tokenizer, dataset):

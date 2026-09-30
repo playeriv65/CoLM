@@ -111,6 +111,34 @@ def build_eval_sets(
 # ---------------------------------------------------------------------------
 # Loss
 # ---------------------------------------------------------------------------
+def label_nll(model, input_ids, attention_mask, labels, autocast=contextlib.nullcontext):
+    """Per-example NLL sum and label-token count, with the LM head applied at label positions only.
+
+    Equal to the cross-entropy of the full ``[B, T, V]`` logits (``ignore_index`` rows contribute
+    nothing), but the logits exist for the completion tokens alone: a padded batch of 8 x 2048
+    tokens would otherwise materialise fp16 logits, their fp32 copy and the log-softmax, a few GB
+    of differently sized blocks per batch that the caching allocator keeps reserved afterwards.
+    The backbone and the head are called directly, as `PreTrainedModel.forward` does; PEFT wrappers
+    forward the accessors, and LoRA layers live inside the modules. Accelerate's mixed precision
+    is applied by wrapping ``model.forward``, which this bypasses: pass the context as `autocast`
+    (``trainer.accelerator.autocast`` in training).
+    """
+    model = getattr(model, "module", model)  # DistributedDataParallel
+    targets = labels[:, 1:]
+    valid = targets != IGNORE_INDEX
+    with autocast():
+        hidden = model.get_decoder()(
+            input_ids=input_ids, attention_mask=attention_mask
+        ).last_hidden_state
+        hidden = hidden[:, :-1][valid]
+        logits = model.get_output_embeddings()(hidden)
+    row = valid.nonzero()[:, 0]
+    token_nll = F.cross_entropy(logits.float(), targets[valid], reduction="none")
+    nll = torch.zeros(len(input_ids), dtype=torch.float64, device=input_ids.device)
+    nll.index_add_(0, row, token_nll.double())
+    return nll, valid.sum(dim=1)
+
+
 @torch.no_grad()
 def evaluate_loss(
     model,
@@ -131,21 +159,16 @@ def evaluate_loss(
     for start in range(0, len(order), batch_size):
         chunk = order[start : start + batch_size]
         batch = collator([dataset[i] for i in chunk])
-        input_ids = batch["input_ids"].to(device)
-        attention_mask = batch["attention_mask"].to(device)
-        labels = batch["labels"].to(device)
-        with autocast():
-            logits = model(input_ids=input_ids, attention_mask=attention_mask).logits
-        targets = labels[:, 1:]
-        token_nll = F.cross_entropy(
-            logits[:, :-1].float().reshape(-1, logits.shape[-1]),
-            targets.reshape(-1),
-            ignore_index=IGNORE_INDEX,
-            reduction="none",
-        ).view_as(targets)
+        nll, count = label_nll(
+            model,
+            batch["input_ids"].to(device),
+            batch["attention_mask"].to(device),
+            batch["labels"].to(device),
+            autocast,
+        )
         idx = torch.tensor(chunk)
-        nll_sum[idx] = token_nll.sum(dim=1).double().cpu()
-        tok_count[idx] = (targets != IGNORE_INDEX).sum(dim=1).cpu()
+        nll_sum[idx] = nll.cpu()
+        tok_count[idx] = count.cpu()
 
     total_tokens = int(tok_count.sum())
     counted = tok_count > 0
@@ -219,6 +242,9 @@ class EvalLossCallback(TrainerCallback):
         started = time.time()
         memory = {}
         if torch.cuda.is_available():
+            # Cached training blocks do not fit the evaluation's tensors and would be topped up
+            # (55 GB reserved for a 16 GB evaluation); start from an empty cache.
+            torch.cuda.empty_cache()
             torch.cuda.reset_peak_memory_stats()
         results = evaluate_sets(
             trainer.model,
@@ -226,10 +252,11 @@ class EvalLossCallback(TrainerCallback):
             trainer.processing_class,
             self.batch_size,
             trainer.args.device,
-            trainer.compute_loss_context_manager,
+            trainer.accelerator.autocast,
         )
         if torch.cuda.is_available():
             memory["eval_peak_gb"] = torch.cuda.max_memory_allocated() / 1024**3
+            memory["eval_peak_reserved_gb"] = torch.cuda.max_memory_reserved() / 1024**3
         logs = {}
         for name, result in results.items():
             logs[f"eval_{name}_loss"] = round(result["loss"], 6)
@@ -242,6 +269,9 @@ class EvalLossCallback(TrainerCallback):
             for name, result in results.items():
                 f.write(json.dumps({"step": step, "set": name, **result, **memory}) + "\n")
         trainer.log(logs)
+        if torch.cuda.is_available():
+            # Free the evaluation's cached blocks; otherwise the training phase inherits them.
+            torch.cuda.empty_cache()
         CLOCK.add("train/eval_loss", time.time() - started)
 
 

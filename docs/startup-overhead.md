@@ -34,15 +34,16 @@ end (a shared host: start-up phases are CPU work and move with it).
 
 Train loss 0.774 at step 1, held-out loss 0.5224 and GSM8K loss 0.7240 at step 1024
 (0.5459 / 0.7509 at step 256; base model 0.8812 / 1.3428). Peak memory (allocated / reserved,
-`memory.json`): selection 13.2 GB, training 32.0 GB / 82.1 GB reserved.
+`memory.json`): selection 13.2 GB, training 32.0 GB / 82.1 GB reserved (the reserved jump came from the
+evaluation's full-vocabulary logits, fixed afterwards: about 38 GB, `errors.md` M7).
 
 Reading: 84 % of the job is training steps. The rest is dominated by the evaluation-loss passes
 (10.6 %): 4 x 463k tokens (249k held-out + 214k GSM8K, prompts included) in 115 s is about 16k
 tokens/s, roughly 85 TFLOP/s for a 2.7B model in fp16 autocast over fp32 weights with unmerged LoRA
-and fp32 logits over every position. The batches are length-sorted, so padding is small and packing
-would not help; a larger batch (one fp32 -> fp16 weight cast per forward) or logits at the label
-positions only might give 1.3x on a 10 % phase, i.e. about 2-3 % of a job, and changes the rounding of
-the reported loss, so it is left. Checkpoint writes are network-disk I/O (about 100 MB/s).
+(measured with the logits at every position; with the head at label positions only, M7, the pass time is
+unchanged, 15.8 s + 12.6 s). The batches are length-sorted, so padding is small and packing
+would not help; a larger batch (one fp32 -> fp16 weight cast per forward) might give 1.3x on a 10 % phase, i.e. about
+2-3 % of a job, and changes the rounding of the reported loss, so it is left. Checkpoint writes are network-disk I/O (about 100 MB/s).
 
 ## The token cache (what was changed)
 
@@ -88,7 +89,7 @@ data 6 s, GSM8K set).
 | `save_only_model` | already the default (671 MB adapter, no optimizer state); the 6.7 s per checkpoint is the network disk |
 | final `save_model` duplicates checkpoint-1024 | 6.8 s (0.6 %), below the 3 % bar; the final adapter in `output_dir` is what the docs and `summarize` read |
 | hold-out split (3.5 s), the row loop of the prompts (5.7 s), imports (5.3 s) | 0.3-0.5 % each |
-| evaluation-loss passes | ~85 TFLOP/s, little padding (see above); a larger batch or logits at label positions only might save 2-3 % of a job and change the rounding of the reported loss |
+| evaluation-loss passes | ~85 TFLOP/s, little padding (see above); a larger batch might save 2-3 % of a job and change the rounding of the reported loss (logits at label positions only: done, no time change, `errors.md` M7) |
 | standalone `evalloss` job per arm (~1.3 min with the cache, 1.6 min before) | duplicates the in-training numbers at steps 512 / 1024 (they agree to 6e-5, see the acceptance section below); kept as the independent check, dropping it is a user decision (`TODO.md`) |
 | `evalloss` and `evalacc` in one process | not done: the HF model and the vLLM engine (`gpu_memory_utilization` 0.9) cannot share a GPU, and a shared process would need the worker to pass state between jobs |
 | vLLM engine start | 73 s of an accuracy job that runs 11-18 min: 17 s process + import, 3 s weights, 16 s `torch.compile` (its cache lives in `VLLM_CACHE_ROOT`, local), 25 s of CUDA-graph capture in two passes; `enforce_eager` or fewer capture sizes would save ~25 s at the price of slower decoding or a vLLM-specific knob |
