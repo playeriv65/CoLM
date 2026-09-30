@@ -10,6 +10,7 @@ for a decision.
 | Where is the code, which rules must a change respect? | `../AGENTS.md` |
 | What is running / next / waiting for the user, what may be deleted? | `../TODO.md` |
 | What was wrong in the upstream code, and what does the default path do about it (E-numbers, evidence)? | `errors.md` |
+| Does the code do what the paper says, item by item, and does the premise of the method (one random z, gradient geometry) hold? | `paper-vs-code.md` |
 | Why is a step this fast, what is measured and what is left (O-numbers, F-findings, timing protocol)? | `optimization-backlog.md` |
 | What does the FP16 selection prefix change, and what did it cost / save? | `fp16-prefix.md` |
 | How accurate must the selection forward be (arms R / F / P / H, learning runs, recommendation)? | `selection-precision.md` |

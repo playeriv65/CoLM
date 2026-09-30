@@ -53,7 +53,8 @@ answer sentence. Per source:
 Now nothing is cut; the examples above the model context (2048 tokens for Phi-2) are dropped: 31
 examples (0.012 %) and 56,566 completion tokens (0.14 %).
 
-Not an error, kept: the algorithm of the selection (E1). One fixed random direction z makes every
+Not an error, kept: the algorithm of the selection (E1; the paper-versus-code audit of it, with the measured
+geometry of the single-z feature, is `docs/paper-vs-code.md`). One fixed random direction z makes every
 feature `g_i z`: after the Adam transform facility location is a 1-D k-medoids on `f(g_i)`, so the
 selection changes with fp32 reordering (20-step teacher-forced runs of the upstream code agree with
 themselves in 3 of 20 steps, mean overlap 13.5 of 16). The scalar `g_i` itself is accurate: on
