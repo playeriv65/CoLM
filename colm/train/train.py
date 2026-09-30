@@ -187,14 +187,8 @@ def build_data(data_args, training_args, eval_args, tokenizer, context):
     return dataset, collator, None, heldout
 
 
-def main(argv=None):
-    CLOCK.mark("imports")
-    model_args, data_args, training_args, eval_args = parse_args(argv)
-    if training_args.output_dir_is_auto:
-        training_args.output_dir = default_output_dir(model_args, data_args, training_args)
-    if training_args.run_name is None or training_args.run_name == training_args.output_dir:
-        training_args.run_name = os.path.basename(training_args.output_dir)
-
+def configure_logging(model_args, data_args, training_args) -> None:
+    """Log format and per-process verbosity (rank 0 informs, the others warn)."""
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
         datefmt="%m/%d/%Y %H:%M:%S",
@@ -213,6 +207,59 @@ def main(argv=None):
     )
     logger.info(f"{training_args}\n{model_args}\n{data_args}")
 
+
+def prepare_model(model, training_args) -> int:
+    """Checks that must fail before the data is read, then the low-precision frozen weights;
+    returns the bytes that the latter freed."""
+    if training_args.should_save:  # fail now, not at the first checkpoint minutes into the run
+        check_disk_space(
+            training_args.output_dir,
+            checkpoint_bytes(model.parameters(), training_args.save_only_model),
+            planned_saves(training_args),
+        )
+    keep = fp32_layers_needed(training_args)
+    if keep is None:
+        return 0
+    dtype = torch.float16 if training_args.fp16 else torch.bfloat16
+    freed = store_frozen_linears(model, dtype, keep)
+    logger.info(
+        f"Frozen Linear weights stored in {dtype} (last {keep} layers fp32): {freed / 1e9:.2f} GB freed"
+    )
+    return freed
+
+
+def finish(trainer, result, train_dataset, training_args) -> None:
+    """After the loop: replica check, final model, memory report, metrics, phase record."""
+    CLOCK.last = time.time()  # the loop was split into its phases by PhaseCallback
+    trainer.check_replicas()
+    trainer.save_model()
+    metrics = result.metrics
+    metrics["train_samples"] = len(train_dataset)
+    memory = trainer.save_memory_report()  # peaks of every rank, not only rank 0
+    # (transformers formats every metric named `*_mem_*` as an integer number of bytes)
+    metrics.update({k.replace("_mem_", "_memory_"): v for k, v in memory.items()})
+    logger.info(f"Peak GPU memory (allocated, max over ranks): {memory.get('peak_mem_gb')} GB")
+    trainer.log_metrics("train", metrics)
+    trainer.save_metrics("train", metrics)
+    trainer.save_state()
+    CLOCK.mark("final_save")
+    if trainer.is_world_process_zero():
+        CLOCK.save(
+            os.path.join(training_args.output_dir, PHASES_FILENAME), steps=trainer.state.global_step
+        )
+    if torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()  # a clean exit (NCCL warns otherwise)
+
+
+def main(argv=None):
+    CLOCK.mark("imports")
+    model_args, data_args, training_args, eval_args = parse_args(argv)
+    if training_args.output_dir_is_auto:
+        training_args.output_dir = default_output_dir(model_args, data_args, training_args)
+    if training_args.run_name is None or training_args.run_name == training_args.output_dir:
+        training_args.run_name = os.path.basename(training_args.output_dir)
+    configure_logging(model_args, data_args, training_args)
+
     set_seed(training_args.seed)
     CLOCK.mark("config")
     context = context_length(model_args)
@@ -225,20 +272,7 @@ def main(argv=None):
     add_padding_to_tokenizer(tokenizer)
     CLOCK.mark("tokenizer")
     model = build_model(model_args, training_args, tokenizer)
-    if training_args.should_save:  # fail now, not at the first checkpoint minutes into the run
-        check_disk_space(
-            training_args.output_dir,
-            checkpoint_bytes(model.parameters(), training_args.save_only_model),
-            planned_saves(training_args),
-        )
-    keep = fp32_layers_needed(training_args)
-    freed = 0
-    if keep is not None:
-        dtype = torch.float16 if training_args.fp16 else torch.bfloat16
-        freed = store_frozen_linears(model, dtype, keep)
-        logger.info(
-            f"Frozen Linear weights stored in {dtype} (last {keep} layers fp32): {freed / 1e9:.2f} GB freed"
-        )
+    freed = prepare_model(model, training_args)
     CLOCK.mark("model_load")
     train_dataset, collator, analysis_dataset, heldout = build_data(
         data_args, training_args, eval_args, tokenizer, context
@@ -280,25 +314,7 @@ def main(argv=None):
     CLOCK.mark("config_save")
 
     result = trainer.train(resume_from_checkpoint=model_args.checkpoint_path)
-    CLOCK.last = time.time()  # the loop was split into its phases by PhaseCallback
-    trainer.check_replicas()
-    trainer.save_model()
-    metrics = result.metrics
-    metrics["train_samples"] = len(train_dataset)
-    memory = trainer.save_memory_report()  # peaks of every rank, not only rank 0
-    # (transformers formats every metric named `*_mem_*` as an integer number of bytes)
-    metrics.update({k.replace("_mem_", "_memory_"): v for k, v in memory.items()})
-    logger.info(f"Peak GPU memory (allocated, max over ranks): {memory.get('peak_mem_gb')} GB")
-    trainer.log_metrics("train", metrics)
-    trainer.save_metrics("train", metrics)
-    trainer.save_state()
-    CLOCK.mark("final_save")
-    if trainer.is_world_process_zero():
-        CLOCK.save(
-            os.path.join(training_args.output_dir, PHASES_FILENAME), steps=trainer.state.global_step
-        )
-    if torch.distributed.is_initialized():
-        torch.distributed.destroy_process_group()  # a clean exit (NCCL warns otherwise)
+    finish(trainer, result, train_dataset, training_args)
 
 
 if __name__ == "__main__":
