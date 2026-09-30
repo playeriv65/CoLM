@@ -141,14 +141,13 @@ class MezoEfficient(Extractor):
         self.perturbation = Perturbation(zo_params, args.mezo_eps, seed)
         self.names = {n: self.split.relative_name(n) for n in self.perturbation.names}
         self.prefix_dtype = args.selection_prefix_dtype
-        if self.prefix_dtype == "float16" and any(
-            p.is_floating_point() and p.dtype != torch.float32
-            for module in (self.split.decoder, self.split.head)
-            for p in module.parameters()
-        ):
-            raise ValueError("float16 selection prefix requires fp32 model weights")
         self.fp32_tail = args.selection_prefix_fp32_tail
         prefix_layers = len(self.split.layers) - 1
+        if self.prefix_dtype == "float16" and self._has_low_precision_weights():
+            raise ValueError(
+                "float16 selection prefix requires fp32 model weights (frozen Linear weights of "
+                "the fp16 prefix layers may be stored in fp16: `colm/train/frozen_weights.py`)"
+            )
         if not 0 <= self.fp32_tail <= prefix_layers:
             raise ValueError(
                 f"selection_prefix_fp32_tail must be in [0, {prefix_layers}] "
@@ -159,6 +158,24 @@ class MezoEfficient(Extractor):
                 f"selection_prefix_fp32_tail={self.fp32_tail} needs selection_prefix_dtype=float16 "
                 f"(got {self.prefix_dtype}); set selection_prefix_fp32_tail=0 for an fp32 prefix"
             )
+
+    def _has_low_precision_weights(self) -> bool:
+        """A weight below fp32 that the selection needs in fp32: any but the frozen Linear layers
+        of the prefix layers that run under the fp16 autocast."""
+        autocast_layers = self.split.layers[: max(0, len(self.split.layers) - 1 - self.fp32_tail)]
+        stored_low = {
+            id(p)
+            for layer in autocast_layers
+            for module in layer.modules()
+            if isinstance(module, torch.nn.Linear)
+            for p in module.parameters()
+            if not p.requires_grad
+        }
+        return any(
+            p.is_floating_point() and p.dtype != torch.float32 and id(p) not in stored_low
+            for module in (self.split.decoder, self.split.head)
+            for p in module.parameters()
+        )
 
     def extract(self, pack):
         split, t = self.split, self.timer

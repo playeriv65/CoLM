@@ -29,6 +29,7 @@ from colm.eval.eval_loss import add_eval_loss_callback
 from colm.phases import CLOCK
 from colm.train.config import context_length, parse_args, resolved_config, save_resolved_config
 from colm.train.data_arguments import get_data_statistics
+from colm.train.frozen_weights import fp32_layers_needed, store_frozen_linears
 from colm.train.model_arguments import add_padding_to_tokenizer
 from colm.train.phase_callback import PhaseCallback
 from colm.train.preflight import check_disk_space, checkpoint_bytes, planned_saves
@@ -230,6 +231,14 @@ def main(argv=None):
             checkpoint_bytes(model.parameters(), training_args.save_only_model),
             planned_saves(training_args),
         )
+    keep = fp32_layers_needed(training_args)
+    freed = 0
+    if keep is not None:
+        dtype = torch.float16 if training_args.fp16 else torch.bfloat16
+        freed = store_frozen_linears(model, dtype, keep)
+        logger.info(
+            f"Frozen Linear weights stored in {dtype} (last {keep} layers fp32): {freed / 1e9:.2f} GB freed"
+        )
     CLOCK.mark("model_load")
     train_dataset, collator, analysis_dataset, heldout = build_data(
         data_args, training_args, eval_args, tokenizer, context
@@ -258,7 +267,12 @@ def main(argv=None):
     CLOCK.mark("eval_setup")
     config = resolved_config(
         model_args, data_args, training_args, eval_args,
-        {"context_length": context, "train_examples": len(train_dataset), **trainer.describe()},
+        {
+            "context_length": context,
+            "train_examples": len(train_dataset),
+            "frozen_base_bytes_freed": freed,
+            **trainer.describe(),
+        },
     )  # fmt: skip
     logger.info(f"Resolved config:\n{json.dumps(config, indent=1, default=str)}")
     if training_args.should_save:

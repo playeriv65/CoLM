@@ -134,6 +134,17 @@ class TrainingArguments(HFTrainingArguments):
             "in both modes."
         },
     )
+    frozen_base_low_precision: bool = field(
+        default=True,
+        metadata={
+            "help": "Store the frozen Linear weights of the decoder layers that only run under "
+            "fp16 / bf16 autocast in that dtype (`colm/train/frozen_weights.py`): the same numbers "
+            "as autocast's per-forward cast, without the cast (~9 ms per forward for phi-2) and "
+            "the copies it keeps for the backward (5.6 GB). The fp32 tail and last layer of the "
+            "selection stay fp32; with a float32 selection prefix, or a selection that runs the "
+            "model in fp32 (efficient_mezo off), nothing is converted. Off: fp32 weights."
+        },
+    )
     data_selection_method: Literal["submodlib", "weightedsubmodlib", "none"] = field(
         default="submodlib",
         metadata={"help": "How to select the small batch from the large batch."},
