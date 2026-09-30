@@ -15,6 +15,8 @@ a document (`docs/README.md` is the index); measurements live in `docs/`, not he
       user. v5 = FP16 selection prefix with an FP32 tail of 2 blocks (the Phi-2 default). The v4
       queue/outputs are the plain FP16 prefix (tail 0), a different arm: do not mix or resume them.
 - [ ] Make `math_eval` report loss as well as accuracy (accuracy only today).
+- [ ] System audit follow-ups (`docs/system-audit.md`, prioritised list at its end): measure a real 2/4-GPU
+      run (needs GPUs assigned) to confirm the estimate for the paper setting and the eval sharding.
 - [ ] Optimisation: profile the current fp16-prefix step (launch overhead, training forward/backward)
       before choosing another kernel change; O11 is an optional ~20 ms architecture-specific change
       (`docs/optimization-backlog.md`). Start-up is settled (`docs/startup-overhead.md`).
@@ -80,6 +82,9 @@ accuracy passed on 2026-09-28; on 2026-09-29 the same chain (1024-step train, st
 accuracy, SuperGLUE) was run by hand on GPU 2 (`docs/startup-overhead.md`).
 
 ## Done
+
+- 2026-09-29 System audit: eval-callback collective mismatch fixed, sharded eval loss, token-balanced training
+  shares, numpy `pack`, fp16-stored frozen weights, resume / disk / launcher preflight (`docs/system-audit.md`).
 
 - 2026-09-29 Selection Adam moments saved with every checkpoint and restored on resume (`docs/errors.md` E12,
   `colm/train/selection_state.py`, `tests/test_trainers.py`).

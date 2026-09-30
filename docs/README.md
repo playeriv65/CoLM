@@ -17,6 +17,7 @@ for a decision.
 | In which precision does the upstream code really run its selection and training? | `upstream-precision.md` |
 | Which blocks make the fp16 TRAINING gradient inexact, and what does an fp32 q/k + attention tail cost? | `training-precision.md` |
 | Where does the time of a whole job go (start-up, tokenisation, evaluation, saves) and what was cached? | `startup-overhead.md` |
+| What did the second system audit find (multi-GPU scaling estimate, robustness, host tail latency, remaining candidates)? | `system-audit.md` |
 | How was the refactor designed (historical notes, 2026-09-28)? | `history/refactor-plan-2026-09-28.md` |
 
 Measurement scripts live in `../scripts/diagnostics/`; each has a header saying what it measured and

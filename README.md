@@ -107,7 +107,7 @@ recipe). The rest is shared over the ranks by token count and goes through the e
 `data_selection_unit` (default: the batched last-layer MeZO estimate); for it a feature is `g_i z`
 with one fixed direction z, so each rank sends one scalar per example and rank 0 builds the
 features. Facility location picks `small_batch_ratio` of the pool source by source, the picks are
-broadcast and every rank trains on its share, in packed forwards chosen by `train_max_tokens`:
+broadcast and every rank trains on a token-balanced share (the step lasts as long as the slowest rank), in packed forwards chosen by `train_max_tokens`:
 N > 0 (memory mode, default 1536) packs the examples greedily into forwards of at most N tokens and
 accumulates the gradients (phi-2, default recipe: 0.89 s per step, 32.0 GB peak training memory,
 `docs/startup-overhead.md`); `0` (speed mode) puts the whole step into one forward (no faster on
@@ -182,8 +182,9 @@ is trained on in another solution format; indices saved as `holdout_indices.json
 the GSM8K test solutions in the MathInstruct CoT style. Off by default (`holdout_size=0`,
 `eval_loss_steps=[]` = the paper recipe); `holdout_size > 0` is a deviation from the paper (fewer
 training examples) and must be the same across compared runs. With `eval_loss_steps` the trainer
-evaluates after those steps on rank 0 (`<output_dir>/eval_loss.jsonl`, `eval_<set>_loss` in the
-trainer log; the step after an evaluation is longer). A saved adapter is evaluated with
+evaluates after those steps (with several ranks each takes every N-th batch and the sums are added
+up: the same numbers, less time; rank 0 writes `<output_dir>/eval_loss.jsonl` and `eval_<set>_loss`
+into the trainer log; the step after an evaluation is longer). A saved adapter is evaluated with
 `colm-eval loss --train_config <json> --adapter <ckpt>... [--base] --output <json>`.
 
 ### LoRA rank sweep (queue)

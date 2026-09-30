@@ -35,6 +35,9 @@ are no other launch scripts: do not add shell wrappers, extend the entry points.
   `batching.train_tokens` (= `train_max_tokens`, a plain token budget; `accelerator.no_sync` for all
   but the last). Optimizer step, clipping, scheduler, logging, checkpointing are stock. Do not
   copy HF loop internals back in or touch private HF attributes.
+  `colm/train/preflight.py` — checks before a run or resume (a complete checkpoint, `save_only_model` warning,
+  free disk for the planned checkpoints); `colm/train/frozen_weights.py` — frozen fp32 Linear weights stored in
+  fp16 where nothing needs them in fp32 (`frozen_base_low_precision`, same numbers, `docs/system-audit.md`).
   `colm/train/selection_state.py` — the selector's Adam moments go into every `checkpoint-N/selection_state.pt`
   (rank 0, `on_save`) and come back in `CoresetTrainer.train(resume_from_checkpoint=...)` (`docs/errors.md` E12).
 - `colm/selection/` — `features.py` (one extractor per `data_selection_unit`, on packed batches;
@@ -118,6 +121,13 @@ are no other launch scripts: do not add shell wrappers, extend the entry points.
   from `train_max_tokens=1536`; JSON or CLI values override either budget.
   `--pack_tokens 0` restores the data-derived selection budget. The one-run
   timing comparison and its machine-load caveat are in `docs/fp16-prefix.md`.
+
+- Multi-rank hygiene: every rank must issue the same collectives in the same order, so a callback that
+  uses one (`EvalLossCallback`) runs on all ranks and only rank 0 writes; `Trainer.log` inside a callback
+  clears `control.should_log` (restore it, or that rank skips the step's loss gather). Host-side batch
+  building is numpy only (`packing.pack`): tiny torch CPU ops run on the intra-op thread pool and show
+  tens-of-milliseconds tails on a loaded host. Multi-rank behaviour is tested with gloo runs
+  (`tests/test_distributed.py`); anything that touches a collective needs a case there.
 
 ## Optimisation work
 
