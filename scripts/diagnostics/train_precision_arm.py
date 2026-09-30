@@ -15,6 +15,10 @@ steps, the seed and the selection arm differ:
     random_kept  the selector's structure with a random ranking: kept sources always trained,
             the other picks random inside each source with the selector's quotas
 
+`--train-attention Vk` runs the training forward with a per-layer attention precision of
+`measure_training_attention.py` (V0 = the library default, V5q = fp32 q/k projections and fp32
+attention in blocks 29-31; docs/training-precision.md); the selection is untouched.
+
     CUDA_VISIBLE_DEVICES=<gpu> python -u scripts/diagnostics/train_precision_arm.py --arm F --seed 0 \
         --steps 300 --eval-steps 100 200 300 --out-root $COLM_ARTIFACT_ROOT/artifacts/CoLM/precision-DATE
 """
@@ -43,6 +47,9 @@ ARMS = {
 def arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument("--arm", choices=sorted(ARMS), required=True)
+    parser.add_argument(
+        "--train-attention", default="V0", help="variant of measure_training_attention.py"
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--steps", type=int, default=300)
     parser.add_argument("--eval-steps", type=int, nargs="+", default=[100, 200, 300])
@@ -63,7 +70,8 @@ def main():
 
     os.environ.update(local_kernel_env(spec))
     _, base = load_spec(SWEEP)
-    name = f"{args.arm}-seed{args.seed}-{args.steps}steps"
+    attention = "" if args.train_attention == "V0" else f"-{args.train_attention}"
+    name = f"{args.arm}{attention}-seed{args.seed}-{args.steps}steps"
     out = args.out_root / name
     out.mkdir(parents=True, exist_ok=True)
     config = {
@@ -87,7 +95,14 @@ def main():
         precision_arms.install_all_half()
     elif args.arm in ("random", "random_kept"):
         precision_arms.install_random_selection(args.random_seed, args.arm == "random_kept")
-    print(f"ARM {args.arm}: {json.dumps(config)}", flush=True)
+    if args.train_attention != "V0":
+        import measure_training_attention
+
+        spec = measure_training_attention.variants([])[args.train_attention]
+        measure_training_attention.install_for_training(spec)
+    print(
+        f"ARM {args.arm} train_attention {args.train_attention}: {json.dumps(config)}", flush=True
+    )
 
     from colm.train.train import main as train
 
@@ -95,6 +110,10 @@ def main():
     train([str(config_path)])
     info = {
         "arm": args.arm,
+        "train_attention": args.train_attention,
+        "fp32_attention_calls": (
+            measure_training_attention.CFG.fp32_calls if args.train_attention != "V0" else 0
+        ),
         "seed": args.seed,
         "steps": args.steps,
         "random_seed": args.random_seed if args.arm.startswith("random") else None,
