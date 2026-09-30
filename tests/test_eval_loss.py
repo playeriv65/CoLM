@@ -155,6 +155,7 @@ def test_train_callback_and_standalone_cli_agree(tmp_path, tokenizer, mixture_fi
     config = {
         "model_name_or_path": str(model_dir),
         "train_files": [mixture_file],
+        "token_cache_dir": "",  # the default would add a file to the shared cache per test run
         "output_dir": str(tmp_path / "out"),
         "max_steps": 2,
         "per_device_train_batch_size": 4,

@@ -207,7 +207,7 @@ def test_train_writes_the_resolved_config(tmp_path, tokenizer, mixture_file):
     make_phi(tokenizer).save_pretrained(model_dir)
     tokenizer.save_pretrained(model_dir)
     config = {
-        "model_name_or_path": str(model_dir), "train_files": [mixture_file], "output_dir": str(tmp_path / "out"),
+        "model_name_or_path": str(model_dir), "train_files": [mixture_file], "token_cache_dir": "", "output_dir": str(tmp_path / "out"),
         "max_steps": 1, "gradient_accumulation_steps": 2, "keep_sources": "0", "last_layer_index": 1,
         "zo_dim": 16, "lora_r": 4, "lora_alpha": 16, "use_cpu": True, "precision": "fp32", "selection_prefix_dtype": "float32", "save_strategy": "no",
         "lora_target_modules": ["q_proj", "k_proj", "v_proj", "fc1", "fc2"],

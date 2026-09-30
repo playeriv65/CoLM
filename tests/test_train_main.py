@@ -20,6 +20,7 @@ def test_train_main_runs(tmp_path, tokenizer, mixture_file, efficient):
     config = {
         "model_name_or_path": str(model_dir),
         "train_files": [mixture_file],
+        "token_cache_dir": "",  # the default would add a file to the shared cache per test run
         "output_dir": str(tmp_path / "out"),
         "max_steps": 2,
         "per_device_train_batch_size": 4 if efficient else 1,
