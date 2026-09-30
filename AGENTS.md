@@ -107,7 +107,8 @@ are no other launch scripts: do not add shell wrappers, extend the entry points.
   `selection_prefix_fp32_tail=2`: the unperturbed prefix (layers 0-30) uses fp16
   autocast except its last two blocks, which run in fp32 (a forward pre-hook in
   `LastLayerSplit._fp32_tail`, removed when the prefix returns); it requires fp32
-  model weights, while the perturbed last layer and loss remain fp32. The tail
+  weights for the tail, the last layer and the head (the frozen Linears of the fp16 layers are stored in
+  fp16, same numbers: `frozen_base_low_precision`), while the perturbed last layer and loss remain fp32. The tail
   is 0 for other profiles and whenever the prefix is explicitly `float32`
   (a tail with a non-fp16 prefix is an error); tail = all prefix layers equals
   the fp32 prefix, tail 0 the plain fp16 prefix. CLI/JSON overrides take

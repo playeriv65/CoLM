@@ -133,7 +133,9 @@ loudly at the backward). The 2- and 4-rank gloo runs pass without the warning. G
 Throughput scaling 4 x 0.90 / 0.95 = 3.6-3.9x on the training steps (round-robin: 3.4-3.6x); the earlier
 real measurement was 1.29x on 2 GPUs. With the sharded evaluation the job (1024 steps, 4 evaluations,
 3 saves, start-up) is ~1.06e3 s against ~1.15e3 s. Candidates that need >= 2 GPUs to measure (not done):
-put the largest pack last so that its backward hides more of the all-reduce (exposed time, 0-40 ms),
+put the largest pack last so that its backward hides more of the all-reduce (a model in which the
+all-reduce starts with the last backward, 64 us per token, on the simulated 4-rank shares: gain 7 / 27 /
+48 ms per step for an all-reduce of 40 / 70 / 100 ms, i.e. 0.8 / 2.8 / 5 % of the step),
 fp16 gradient compression (`ddp_comm_hook`, halves the traffic but changes the gradient rounding: a
 decision), one object collective instead of two for the memory meter (~1 ms).
 
@@ -253,7 +255,7 @@ _(to be filled: timed A/B of the frozen weights and the numpy `pack`, phi-2 equa
 
 | # | candidate | gain | risk | needs |
 |---|---|---|---|---|
-| 1 | measure a real 2/4-GPU run (`train_tokens`, exposed all-reduce, eval sharding, `find_unused`) and set the order of the packs so the largest is last | 0-5 % of the step at 4 GPUs | low | 2-4 GPUs |
+| 1 | measure a real 2/4-GPU run (`train_tokens` per rank, exposed all-reduce, eval sharding, `find_unused`), then order the packs of a step so the largest is last (only the accumulation order changes) | 1-5 % of the step at 4 GPUs (model above) | low | 2-4 GPUs |
 | 2 | asynchronous / local-disk checkpoint saves and a hard link for the final adapter | ~15-20 s per job (1.5-1.9 %) | medium (race with `on_save`, rotation) | - |
 | 3 | LoRA merged into the fp16 prefix weights for the selection forward (O12 for fp16) | ~30-40 ms of the prefix (3-4 %) | changes rounding of g_i (precision decision) | user |
 | 4 | TF32 for the fp32 head of the ±eps replay (2.2 TFLOP in SIMT fp32, 38 ms) | ~30 ms (3.4 %) | precision decision (D2) | user |
