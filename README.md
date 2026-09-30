@@ -184,7 +184,7 @@ the GSM8K test solutions in the MathInstruct CoT style. Off by default (`holdout
 training examples) and must be the same across compared runs. With `eval_loss_steps` the trainer
 evaluates after those steps (with several ranks each takes every N-th batch and the sums are added
 up: the same numbers, less time; rank 0 writes `<output_dir>/eval_loss.jsonl` and `eval_<set>_loss`
-into the trainer log; the step after an evaluation is longer). A saved adapter is evaluated with
+into the trainer log; the logged step time of an evaluation step includes the evaluation). A saved adapter is evaluated with
 `colm-eval loss --train_config <json> --adapter <ckpt>... [--base] --output <json>`.
 
 ### LoRA rank sweep (queue)

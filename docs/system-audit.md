@@ -154,9 +154,10 @@ decision), one object collective instead of two for the memory meter (~1 ms).
 
 * Host syncs (`.item()` / `.cpu()` / `.tolist()`): the census per step is 7 syncing calls outside the
   copies of the packs (60 + 36 pageable host-to-device copies of ~120-235 KB in total); the values are
-  needed on the host (`to_cpu` is 0.1 ms). Python loops over examples are 30-example loops of 1 us
-  work. `dict` copies, repeated tensor constructions: none above 0.1 ms. `pin_memory` /
-  `non_blocking`: the copies are < 0.3 MB per step; nothing to gain. Dataloader: one worker, 11 ms per
+  needed on the host (`to_cpu` is 0.1 ms). The python loops run over at most 32 examples. No timed
+  section besides the ones in the table exceeds ~0.3 ms, so `dict` copies and repeated tensor
+  constructions do not show. `pin_memory` / `non_blocking`: the copies are < 0.3 MB per step; nothing
+  to gain. Dataloader: one worker, 11 ms per
   pool, hidden behind the step (`dataloader_num_workers` already 1).
 * **Tail latency of `pack` (implemented).** The 30-110 ms spikes of `pack` and of the host part after
   `scatter` (12 % of the steps in the fine run, loadavg 22-35) are not the algorithm: `pack` (and

@@ -226,7 +226,8 @@ class EvalLossCallback(TrainerCallback):
 
     Results go to the trainer log (``eval_<set>_loss``, so they land in ``trainer_state.json``)
     and to ``<output_dir>/eval_loss.jsonl``. The wall-clock of each evaluation is recorded
-    (``seconds``); the step that follows an evaluation is longer by that amount.
+    (``seconds``); the logged ``step_time_s`` of an evaluation step includes that time (the step's loss
+    row is written after the callback).
     """
 
     def __init__(self, trainer, sets, steps, batch_size, out_file):
