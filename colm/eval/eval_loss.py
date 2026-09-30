@@ -285,7 +285,13 @@ class EvalLossCallback(TrainerCallback):
         with open(self.out_file, "a") as f:
             for name, result in results.items():
                 f.write(json.dumps({"step": step, "set": name, **result, **memory}) + "\n")
+        # `Trainer.log` ends the step's logging (`CallbackHandler.on_log` clears `should_log`),
+        # which would drop the loss row of this step on rank 0 alone: with several ranks the other
+        # ranks would enter the loss gather that rank 0 skips, and the collectives mismatch.
+        control = self.trainer.control
+        should_log = control.should_log
         self.trainer.log(logs)
+        control.should_log = should_log
 
 
 def add_eval_loss_callback(

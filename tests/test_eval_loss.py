@@ -205,6 +205,9 @@ def test_train_callback_and_standalone_cli_agree(tmp_path, tokenizer, mixture_fi
     state = json.loads((out / "trainer_state.json").read_text())
     logged = {h["step"]: h for h in state["log_history"] if "eval_heldout_loss" in h}
     assert set(logged) == {0, 2}
+    # The evaluation must not swallow the loss row of its own step (it did: `Trainer.log` clears
+    # `should_log`, so steps 256, 512, ... had no loss and, with several ranks, a mismatched gather).
+    assert [h["step"] for h in state["log_history"] if "loss" in h] == [1, 2]
     final = {r["set"]: r["loss"] for r in records if r["step"] == 2}
 
     cli_out = tmp_path / "cli.json"

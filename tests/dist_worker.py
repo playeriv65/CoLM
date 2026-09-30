@@ -11,6 +11,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from equivalence.fixtures import tokenizer  # noqa: E402
 from equivalence.helpers import build, lora_state, make_args  # noqa: E402
 
+from colm.eval.eval_loss import EvalLossCallback  # noqa: E402
+
 CASES = {  # per-device batch, gradient accumulation (per rank), extra arguments
     "efficient": (2, 2, dict(efficient_mezo=True, keep_sources="0")),
     "regular": (1, 4, dict(data_selection_unit="mezo", keep_sources="0")),
@@ -63,9 +65,17 @@ def run(case: str, data: str, out: str, gas_scale: int = 1, steps: int = 2) -> d
         return step(model_, inputs, num_items_in_batch)
 
     trainer.training_step = training_step
+    eval_file = os.path.join(out, "eval_loss.jsonl")  # the callback is a collective, rank 0 writes
+    trainer.add_callback(
+        EvalLossCallback(trainer, {"train": trainer.train_dataset}, [1], 5, eval_file)
+    )
     trainer.train()
     replicas = trainer.check_replicas()
+    evaluated = []
+    if trainer.is_world_process_zero() and os.path.exists(eval_file):
+        evaluated = [json.loads(line) for line in open(eval_file)]
     return {
+        "eval": [{k: r[k] for k in ("step", "set", "loss", "n_tokens")} for r in evaluated],
         "replicas": replicas,
         "trained": trained,
         "lora": {k: v.tolist() for k, v in lora_state(model).items()},

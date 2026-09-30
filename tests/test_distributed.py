@@ -82,6 +82,12 @@ def test_ranks_agree_with_one_process(tmp_path, mixture_file, case, world):
             msg=lambda m, n=name: f"{n}: {m}",
         )
     assert ranks[0]["loss"] == pytest.approx(single["loss"], rel=1e-6)
+    # The evaluation after step 1 is a collective (every rank takes its share of the batches);
+    # rank 0 records it, and it is the single-process number of the same weights.
+    (recorded,) = ranks[0]["eval"]
+    assert all(not r["eval"] for r in ranks[1:]) and recorded["step"] == 1
+    assert recorded["loss"] == pytest.approx(single["eval"][0]["loss"], rel=1e-9)
+    assert recorded["n_tokens"] == single["eval"][0]["n_tokens"]
     # One gradient all-reduce per optimizer step, not one per sub-batch.
     assert [r["all_reduces"] for r in ranks] == [STEPS] * world
 
