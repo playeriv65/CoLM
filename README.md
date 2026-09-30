@@ -109,8 +109,8 @@ with one fixed direction z, so each rank sends one scalar per example and rank 0
 features. Facility location picks `small_batch_ratio` of the pool source by source, the picks are
 broadcast and every rank trains on a token-balanced share (the step lasts as long as the slowest rank), in packed forwards chosen by `train_max_tokens`:
 N > 0 (memory mode, default 1536) packs the examples greedily into forwards of at most N tokens and
-accumulates the gradients (phi-2, default recipe: 0.89 s per step, 32.0 GB peak training memory,
-`docs/startup-overhead.md`); `0` (speed mode) puts the whole step into one forward (no faster on
+accumulates the gradients (phi-2, default recipe: 0.82 s per step and 23.7 GB peak training memory since
+the frozen weights are stored in fp16, `docs/system-audit.md`; 0.89 s and 32.0 GB before, `docs/startup-overhead.md`); `0` (speed mode) puts the whole step into one forward (no faster on
 phi-2, but 57 GB peak / 94 GB reserved; measured with the FP32 prefix, table in
 `docs/optimization-backlog.md`). The loss of a step is
 the mean over all label tokens of the examples trained in the step (all ranks) whatever the
