@@ -13,7 +13,7 @@ the evidence that they do not.
 | area | verdict | changed |
 |---|---|---|
 | (a) multi-GPU | two real defects found and fixed, one large imbalance fixed; the serial rank-0 part is small now | eval-loss callback hang (`should_log`), eval sharded over the ranks, token-balanced training shares, DDP unused-parameter search off |
-| (b) per-step fixed costs | host part is < 2 % of the step; one tail-latency source found; the remaining cost is GPU work, of which ~8 % is a repeated weight cast | `pack` in numpy, frozen fp32 Linear weights stored in fp16 |
+| (b) per-step fixed costs | host part was 2.4 % of the step, all of it tail latency; the rest is GPU work, of which 6 % was a repeated weight cast | `pack` in numpy (-19 ms), frozen fp32 Linear weights stored in fp16 (-55 ms, -8.6 GB peak) |
 | (c) checkpoints / eval duplicates | 1.9 % of a job, below the bar; nothing changed | - |
 | (d) robustness | resume from an incomplete or model-only checkpoint, disk-full at the first save, launcher SIGTERM, missing loss rows | preflight module, launcher signal forwarding, validation, OOM hint |
 | (e) structure / tests | no dead options; `train.main` split; tests for the collective paths were missing | test for eval callback and sharding on 2/3 ranks, token balance, pack geometry, resume |
@@ -123,16 +123,17 @@ loudly at the backward). The 2- and 4-rank gloo runs pass without the warning. G
 
 | term | ms | basis |
 |---|---:|---|
-| one-GPU step (same tokens per rank) | 885-908 | fine timing, simulation |
+| one-GPU step (same tokens per rank) | 821 (885-908 before the fp16-stored weights and the numpy `pack`) | fine timing, "GPU runs" |
 | imbalance of the slowest rank (longest-first) | +10 | simulation (round-robin: +82) |
 | rank-0 selection at N = 128 | +6 | measured above |
 | ten object collectives | +3 | estimate |
 | gradient all-reduce, 671 MB fp32, exposed part | 0-50 | ring: 2 (W-1)/W x 671 MB = 1 GB per rank at 10-25 GB/s PCIe (GPUs 0-3 are PIX/PXB, no NVLink), 40-100 ms, of which up to the last pack's backward (~75 ms) overlaps; unmeasured |
-| **step** | **~0.93-0.98 s** | |
+| **step** | **~0.84-0.89 s** | |
 
-Throughput scaling 4 x 0.90 / 0.95 = 3.6-3.9x on the training steps (round-robin: 3.4-3.6x); the earlier
-real measurement was 1.29x on 2 GPUs. With the sharded evaluation the job (1024 steps, 4 evaluations,
-3 saves, start-up) is ~1.06e3 s against ~1.15e3 s. Candidates that need >= 2 GPUs to measure (not done):
+Throughput scaling 4 x 0.821 / (0.84-0.89) = 3.7-3.9x on the training steps (with round-robin shares
+and the fp32 weights, on the same model: 3.4-3.6x); the earlier real measurement was 1.29x on 2 GPUs.
+With the sharded evaluation the job (1024 steps, 4 evaluations, 3 saves, start-up) is ~0.98e3 s against
+~1.07e3 s with an evaluation on rank 0 only (0.82-0.89 s x 1024 + 29 s (115 s) + 20 s + ~35 s). Candidates that need >= 2 GPUs to measure (not done):
 put the largest pack last so that its backward hides more of the all-reduce (a model in which the
 all-reduce starts with the last backward, 64 us per token, on the simulated 4-rank shares: gain 7 / 27 /
 48 ms per step for an all-reduce of 40 / 70 / 100 ms, i.e. 0.8 / 2.8 / 5 % of the step),
@@ -167,8 +168,7 @@ decision), one object collective instead of two for the memory meter (~1 ms).
   p99 7 ms, p99.9 55-83 ms, max 107-118 ms; numpy: mean 0.36 ms, p99 0.5 ms, p99.9 0.6 ms, max 0.8-1.3 ms.
   `pack` is now numpy only with identical outputs (2000 random packs equal in values and dtypes against the
   old function; `tests/test_packing.py` keeps a torch reference, including examples without labels).
-  Expected gain: the mean of the two host sections (~20 ms, 2.3 %) minus the ~3 ms that is real work,
-  ~1.5-2 % of the step and a smoother step time. To be confirmed in the timed run below.
+  Measured in the timed run below: -19 ms per step (2.1 %), no host spike above 2 ms left.
 * **Weight casts (implemented, `colm/train/frozen_weights.py`).** Autocast casts a Linear's fp32 weight to
   fp16 at every forward, and it does not cache frozen weights (only leaves that require grad). Per
   step: ~5 selection packs (29 fp16 layers) + 3.2 training packs (32 layers) = ~8 forwards x 13.7-15.1 GB
@@ -178,9 +178,9 @@ decision), one object collective instead of two for the memory meter (~1 ms).
   embeddings and all LoRA tensors stay fp32; not applied with an fp32 selection prefix or a
   non-efficient extractor). The numbers are the same because autocast's cast is this cast: prefix
   state, training loss and LoRA gradients are bit-identical (CPU bf16 tests, and the tiny model on GPU 2
-  with fp16, `test_stored_fp16_weights_equal_autocast_on_the_gpu_bit_for_bit`). Memory (phi-2, GPU 2, 8
-  steps, shared card; memory is not affected by sharing): training peak 29.9 -> 21.4 GB, selection peak
-  12.9 -> 8.5 GB, reserved 33.3 -> 27.9 GB.
+  with fp16, `test_stored_fp16_weights_equal_autocast_on_the_gpu_bit_for_bit`; phi-2: prefix states
+  bit-identical, see "GPU runs"). Measured (130-step fine runs, "GPU runs"): **-54.6 ms per step
+  (-6.2 %)**, training peak memory 32.3 -> 23.7 GB, selection 13.1 -> 8.7 GB, reserved 43.0 -> 33.8 GB.
 
 ## (c) Checkpoints and duplicated work
 
@@ -250,7 +250,51 @@ the choice a question of how often a run dies, which the history does not say.
 
 ## GPU runs
 
-_(to be filled: timed A/B of the frozen weights and the numpy `pack`, phi-2 equality check)_
+Physical GPU 2 (`00000000:4E:00.0`), phi-2, `configs/diagnostics/timing_phi2_efficient.json` (paper recipe,
+`--profile_timing fine`, 130 steps, census on steps 1-10, seed 0, so the same pools in the same order), one
+run per arm, the two arms one after the other (A `--frozen_base_low_precision false`, B `true`), loadavg
+20.1 before A, 19.6 between, 18.6 after B. The card was alone when the runs started (a check before
+launch); from step 118 of B every section, the host `pack` included, inflates (`pack` 1 -> 125 ms, prefix
+290 -> 640 ms): another job started on GPU 2. Those 13 steps are dropped, and both arms are compared on
+steps 11-117 (107 steps; 50-step sliding means within 2.4 % (A), 3.4 % (B), 4.4 % (the old run)). Raw
+files and the analysis script: `$COLM_ARTIFACT_ROOT/artifacts/CoLM/system-audit-20260929/`
+(`step_timing-timed-frozen-*.jsonl`, `timed-ab-summary-steps11-117.txt`, `analyze_ab.py`).
+
+| ms per step, steps 11-117, mean | old code, fine run of 2026-09-29 13:19 (`fp16-select-pack1536`) | A: this branch, fp32 weights | B: this branch, fp16 frozen weights |
+|---|---:|---:|---:|
+| **step** (wall clock) | 887.6 | 875.9 | **821.3** (median 850 / 856 / 807) |
+| prefix (5.9 k forwarded tokens) | 287.5 | 319.4 | 275.7 |
+| ±eps replay | 98.5 | 98.2 | 98.6 |
+| `pack` (host) mean / p90 / max | 14.6 / 34 / 112 | 1.1 / 1.4 / 2 | 1.2 / 1.5 / 2 |
+| host part after `scatter` mean / max | 6.6 / 73 | 0.7 / 1 | 0.7 / 1 |
+| train forward / backward | 209.3 / 239.5 | 201.9 / 226.2 | 183.8 / 231.0 |
+| trained tokens per step | 3753 | 3766 | 3739 |
+| peak memory, training / selection (allocated) | - | 32.3 / 13.1 GB | 23.7 / 8.7 GB |
+| peak reserved | - | 43.0 GB | 33.8 GB |
+
+* **Host tails (numpy `pack`)**: `pack` 14.6 -> 1.1 ms (max 112 -> 2 ms), the host part after `scatter`
+  6.6 -> 0.7 ms (max 73 -> 1 ms): -19 ms per step (2.1 %), and no step of the run has a host spike. The
+  old column is another run at another time; its GPU sections differ from A by more than the code can
+  explain (prefix 287 against 319 ms with identical GPU code), so the GPU part of that comparison is
+  machine noise: only the host rows are attributed to the change.
+* **Frozen fp16 weights, A -> B**: 875.9 -> 821.3 ms, **-54.6 ms (-6.2 %)**, median -5.8 %. The prefix
+  loses 43.7 ms (5 packs x 8.7 ms: the predicted ~9 ms per forward of casting, 15 GB of traffic), the
+  training forward 18 ms (3.2 forwards x 5.6 ms), the backward gains 4.8 ms (noise class). The
+  estimate of ~75 ms was high for the training side; the measured saving is 55 ms. Start-up: model load +1.0 s
+  (the conversion on the CPU), trainer init -2.9 s (4.6 GB less to copy), net -1.9 s. Mean train loss over the
+  130 steps 0.698 (A) / 0.685 (B): one seed each, the selection of a step is decided at rounding level, so
+  this is not a learning comparison (the numbers of a step are identical, see below).
+* **Equality check on phi-2** (`phi2_frozen_equal.py`, one real pool of 32 examples, 8477 tokens, shared
+  GPU, twice): the prefix states of all packs are bit-identical with fp32 weights and with the stored fp16
+  weights; g_i differs by a median relative 2.0e-4 (5.3e-4 in the first run) against a repeat noise of the same
+  weights of 1.6e-4 (3.9e-4): the difference is the run-to-run nondeterminism of the fp32 replay, not the
+  storage; the training loss is bit-identical (0.87964942); the LoRA gradient of the selected half differs
+  between two runs of the same weights by up to 1.2e2 in max abs (the flash backward has atomics; the
+  gradient's own scale is ~1e3), and the stored-weight gradient differs from those by no more (9.1e1).
+  The same check on the tiny model on GPU 2 is bit-identical for prefix, loss and gradients.
+* Not measured: anything with more than one GPU (only GPU 2 was assigned); the estimates in (a) are model and
+  simulation, and the sharded evaluation, the token balance and `find_unused` are verified for correctness
+  on 2 / 3 / 4 CPU ranks only.
 
 ## Remaining candidates (prioritised)
 
