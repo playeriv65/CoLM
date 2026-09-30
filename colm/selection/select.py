@@ -43,6 +43,11 @@ class CoresetSelector:
     def load_state_dict(self, state: dict) -> None:
         self.prev_m, self.prev_v = state["prev_m"], state["prev_v"]
 
+    @property
+    def has_state(self) -> bool:
+        """Whether this selector owns Adam moments (the masked_grad unit reads the optimizer's)."""
+        return self.args.mezo_optim == "adam" and not self.uses_optimizer_moments
+
     def needed(self, sources: list[int], total: int) -> np.ndarray:
         """Which examples' features can change the selection of `total` examples of this pool.
 

@@ -35,6 +35,8 @@ are no other launch scripts: do not add shell wrappers, extend the entry points.
   `batching.train_tokens` (= `train_max_tokens`, a plain token budget; `accelerator.no_sync` for all
   but the last). Optimizer step, clipping, scheduler, logging, checkpointing are stock. Do not
   copy HF loop internals back in or touch private HF attributes.
+  `colm/train/selection_state.py` — the selector's Adam moments go into every `checkpoint-N/selection_state.pt`
+  (rank 0, `on_save`) and come back in `CoresetTrainer.train(resume_from_checkpoint=...)` (`docs/errors.md` E12).
 - `colm/selection/` — `features.py` (one extractor per `data_selection_unit`, on packed batches;
   `extract` -> per-example values, `expand` -> features; the MeZO extractor returns g_i),
   `zo.py` (`Perturbation`: fixed-seed z, out-of-place +-eps through `functional_call`;

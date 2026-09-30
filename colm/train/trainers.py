@@ -17,6 +17,7 @@ import time
 import numpy as np
 import torch
 from transformers import PreTrainedModel, Trainer
+from transformers.trainer_utils import get_last_checkpoint
 
 from colm.data.superglue import classification_loss
 from colm.selection.batching import UNLIMITED, PackedBatching
@@ -32,6 +33,10 @@ from colm.selection.pool import (
 from colm.selection.select import CoresetSelector
 from colm.selection.zo import zo_parameters
 from colm.train.memory import MemoryMeter
+from colm.train.selection_state import (
+    SelectionStateCallback,
+    load_selection_state,
+)
 from colm.train.step_timing import StepTimer, StepTimingCallback
 
 logger = logging.getLogger(__name__)
@@ -225,6 +230,7 @@ class CoresetTrainer(_Trainer):
             moments=self._optimizer_moments if args.data_selection_unit == "masked_grad" else None,
             weight_prior=self.extractor.weight_prior if self.zo_params else None,
         )
+        self.add_callback(SelectionStateCallback(self.selector, self.zo_seed))
         self.batching = PackedBatching(
             args, getattr(self.train_dataset, "mean_tokens", None), self.extractor.batched
         )
@@ -254,6 +260,15 @@ class CoresetTrainer(_Trainer):
             "selection_prefix_dtype": getattr(self.extractor, "prefix_dtype", "not_applicable"),
             "selection_prefix_fp32_tail": getattr(self.extractor, "fp32_tail", "not_applicable"),
         }
+
+    def train(self, resume_from_checkpoint=None, *args, **kwargs):
+        """`Trainer.train`; on a resume the selection moments come back before the first step."""
+        checkpoint = resume_from_checkpoint
+        if checkpoint is True:  # the stock Trainer resolves `True` to the newest checkpoint
+            checkpoint = get_last_checkpoint(self.args.output_dir)
+        if checkpoint and self.args.process_index == 0:
+            load_selection_state(self.selector, checkpoint, self.zo_seed, self.args.device)
+        return super().train(resume_from_checkpoint, *args, **kwargs)
 
     # ----- budgets and sub-batches (differ between the two coreset trainers) --------------
     def _check_args(self):

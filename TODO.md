@@ -14,8 +14,6 @@ a document (`docs/README.md` is the index); measurements live in `docs/`, not he
       queues/rank-sweep-v5 --gpu <id>` in tmux window `CoLM-rank-sweep`. The GPU is assigned by the
       user. v5 = FP16 selection prefix with an FP32 tail of 2 blocks (the Phi-2 default). The v4
       queue/outputs are the plain FP16 prefix (tail 0), a different arm: do not mix or resume them.
-- [ ] Wire the selection state into checkpoints: `CoresetSelector.state_dict()` / `load_state_dict()`
-      exist but nothing calls them, so a resumed run restarts the Adam moments (`docs/errors.md` E12).
 - [ ] Make `math_eval` report loss as well as accuracy (accuracy only today).
 - [ ] Optimisation: profile the current fp16-prefix step (launch overhead, training forward/backward)
       before choosing another kernel change; O11 is an optional ~20 ms architecture-specific change
@@ -83,6 +81,8 @@ accuracy, SuperGLUE) was run by hand on GPU 2 (`docs/startup-overhead.md`).
 
 ## Done
 
+- 2026-09-29 Selection Adam moments saved with every checkpoint and restored on resume (`docs/errors.md` E12,
+  `colm/train/selection_state.py`, `tests/test_trainers.py`).
 - 2026-09-29 Wrap-up: token-count cache and `startup.json` phase record (`docs/startup-overhead.md`),
   SuperGLUE tasks load again (namespaced hub ids), `colm-sweep create --dry-run`, dead code removed,
   diagnostics moved to `scripts/diagnostics/`, docs index (`docs/README.md`).

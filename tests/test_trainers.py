@@ -6,6 +6,9 @@ import sys
 import pytest
 import torch
 from equivalence.helpers import build, lora_state, make_args
+from transformers import TrainerCallback
+
+from colm.train.selection_state import SELECTION_STATE_FILE
 
 MAX_STEPS = 2
 
@@ -245,3 +248,99 @@ def test_selection_and_training_run_with_their_own_attention(
     trainer.train()
     assert seen == {"selection": {"eager"}, "training": {"sdpa"}}
     assert trainer.describe()["attn_implementation"] == "sdpa"
+
+
+# ----- selection state in checkpoints (E12) ------------------------------------------------------
+RESUME_STEPS, RESUME_AT = 6, 3
+
+
+class _Interrupt(TrainerCallback):
+    """Stop the run after the checkpoint of step `at` (a crash that lost everything later)."""
+
+    def __init__(self, at):
+        self.at = at
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if state.global_step == self.at:
+            control.should_training_stop = True
+
+
+def _resume_args(out):
+    return make_args(
+        out,
+        per_device_train_batch_size=4,
+        gradient_accumulation_steps=2,
+        small_batch_ratio=0.5,
+        efficient_mezo=True,
+        keep_sources="0",
+        max_steps=RESUME_STEPS,
+        save_strategy="steps",
+        save_steps=RESUME_AT,
+        save_only_model=False,  # a complete checkpoint: model, optimizer, scheduler, RNG
+    )
+
+
+def _run(tmp_path, tokenizer, mixture_file, monkeypatch, name, resume=None, interrupt=False):
+    trainer, model = build(_resume_args(tmp_path / name), tokenizer, mixture_file)
+    trained = _record(trainer, monkeypatch)
+    if interrupt:
+        trainer.add_callback(_Interrupt(RESUME_AT))
+    trainer.train(resume_from_checkpoint=resume)
+    picked = {}
+    for step, indices, _ in trained:
+        picked.setdefault(step, []).extend(indices)
+    return trainer, model, picked
+
+
+def test_resume_reproduces_the_selections_of_an_uninterrupted_run(
+    tmp_path, tokenizer, mixture_file, monkeypatch
+):
+    full, full_model, full_picked = _run(tmp_path, tokenizer, mixture_file, monkeypatch, "full")
+    assert set(full_picked) == set(range(RESUME_STEPS))
+
+    part, _, part_picked = _run(
+        tmp_path, tokenizer, mixture_file, monkeypatch, "part", interrupt=True
+    )
+    assert part.state.global_step == RESUME_AT and set(part_picked) == set(range(RESUME_AT))
+    checkpoint = tmp_path / "part" / f"checkpoint-{RESUME_AT}"
+    assert (checkpoint / SELECTION_STATE_FILE).is_file()
+    saved = torch.load(checkpoint / SELECTION_STATE_FILE, weights_only=True)
+    assert (
+        torch.equal(saved["prev_m"], part.selector.prev_m) and saved["prev_m"].dtype == torch.double
+    )
+
+    rest, rest_model, rest_picked = _run(
+        tmp_path, tokenizer, mixture_file, monkeypatch, "rest", resume=str(checkpoint)
+    )
+    assert rest.state.global_step == RESUME_STEPS
+    assert set(rest_picked) == set(range(RESUME_AT, RESUME_STEPS))
+    for step in range(RESUME_AT, RESUME_STEPS):
+        assert sorted(rest_picked[step]) == sorted(full_picked[step]), f"step {step}"
+    assert torch.allclose(rest.selector.prev_m, full.selector.prev_m, atol=1e-12)
+    assert torch.allclose(rest.selector.prev_v, full.selector.prev_v, atol=1e-12)
+    for name, value in lora_state(full_model).items():
+        assert torch.allclose(lora_state(rest_model)[name], value, atol=1e-10)
+
+
+def test_resume_without_the_selection_state_warns(
+    tmp_path, tokenizer, mixture_file, monkeypatch, caplog
+):
+    part, _, _ = _run(tmp_path, tokenizer, mixture_file, monkeypatch, "part", interrupt=True)
+    checkpoint = tmp_path / "part" / f"checkpoint-{RESUME_AT}"
+    (checkpoint / SELECTION_STATE_FILE).unlink()  # a checkpoint of an older version
+    with caplog.at_level("WARNING", logger="colm.train.selection_state"):
+        rest, _, picked = _run(
+            tmp_path, tokenizer, mixture_file, monkeypatch, "rest", resume=str(checkpoint)
+        )
+    assert f"has no {SELECTION_STATE_FILE}" in caplog.text
+    assert rest.state.global_step == RESUME_STEPS and set(picked) == set(
+        range(RESUME_AT, RESUME_STEPS)
+    )
+
+
+def test_resume_with_another_zo_seed_fails(tmp_path, tokenizer, mixture_file, monkeypatch):
+    part, _, _ = _run(tmp_path, tokenizer, mixture_file, monkeypatch, "part", interrupt=True)
+    trainer, _ = build(_resume_args(tmp_path / "other"), tokenizer, mixture_file)
+    trainer.zo_seed += 1
+    with pytest.raises(ValueError, match="zo_seed"):
+        trainer.train(resume_from_checkpoint=str(tmp_path / "part" / f"checkpoint-{RESUME_AT}"))
