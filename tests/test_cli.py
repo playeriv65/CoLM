@@ -45,6 +45,8 @@ def test_a_plain_run_uses_the_paper_training_recipe_and_profiled_selection(tmp_p
     # flash varlen for the fp16 training forward, sdpa (fp32-capable) for the selection forward
     assert model.attn_implementation == "flash_attention_2"
     assert training.selection_attn_implementation == "sdpa"
+    # execution defaults: no DDP unused-parameter search, frozen fp32 Linears stored in fp16
+    assert training.ddp_find_unused_parameters is False and training.frozen_base_low_precision
 
 
 def test_fp32_runs_keep_the_default_attention(tmp_path):

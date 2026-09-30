@@ -54,6 +54,15 @@ class TrainingArguments(HFTrainingArguments):
             "(11 ms of 32 examples) while the GPU works on this one."
         },
     )
+    ddp_find_unused_parameters: bool | None = field(
+        default=False,
+        metadata={
+            "help": "DDP's search for parameters without a gradient. The Trainer turns it on for a "
+            "PEFT model (it is not a PreTrainedModel), which walks the autograd graph after every "
+            "backward; every LoRA weight is used in every forward, so it is off here (a parameter "
+            "that really is unused then fails loudly at the backward instead of costing time)."
+        },
+    )
     remove_unused_columns: bool = field(
         default=False,
         metadata={
