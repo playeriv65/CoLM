@@ -8,13 +8,27 @@ tokens, W&B keys or machine-private data.
 
 - `uv sync` builds `.venv` (Python 3.12, torch 2.13.0+cu130 from the PyTorch cu130 index,
   transformers 5.x, peft, accelerate, submodlib from git). Extras: `--extra eval` (vLLM 0.30,
-  pinned to the same torch), `--extra wandb`. Lock file `uv.lock` is committed; upgrade with
-  `uv lock --upgrade` and re-run the tests.
+  pinned to the same torch), `--extra wandb`. Lock file `uv.lock` is committed; the large
+  packages are frozen (see "Dependency freeze" below), so do not `uv lock --upgrade`.
 - The uv cache comes from `UV_CACHE_DIR` (machine env), not from pyproject.
 - HF caches must point at the local NVMe (`HF_HOME`), never at a network disk. Pass no
   `cache_dir` in configs unless overriding.
 - After a fresh clone / new worktree run `bash scripts/link-external.sh` (data and out symlinks,
   declared in `external-paths.json`; root from `COLM_ARTIFACT_ROOT`).
+
+## Dependency freeze (from 2026-09-30, for several months)
+
+The large packages are frozen so the machine-wide uv cache holds one copy of each and every
+venv hardlinks it. Revisit in a single consolidated upgrade around 2027-01.
+
+Frozen: torch 2.13.0+cu130 (must come from the `pytorch-cu130` index; the PyPI wheel is a
+different cache entry), triton 3.7.1, vllm 0.30.0 (`--extra eval`), cudnn-cu13 9.20.0.48, nccl-cu13 2.29.7,
+flashinfer-python 0.6.18.post1, xgrammar 0.2.8, Python 3.12, transformers 5.17.0.
+
+- Do not run `uv lock --upgrade` or change these pins; a new dependency that needs a change
+  stops and goes to the user.
+- New projects copy CoLM's `pyproject.toml` pins and `tool.uv.index`.
+- CoLM's `uv.lock` is the reference lock the other repos are aligned to.
 
 ## Entry points
 
