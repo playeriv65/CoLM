@@ -308,6 +308,36 @@ def test_choose_from_the_shares_of_two_ranks_equals_one_pool(tmp_path, tokenizer
     assert indices == expected.indices and weights == expected.weights
 
 
+def test_selected_examples_are_shared_over_the_ranks_by_tokens(
+    tmp_path, tokenizer, mixture_file, monkeypatch
+):
+    """Round-robin would give rank 0 the long examples of this selection; the shares are equal in tokens."""
+    from colm.train import trainers
+
+    trainer, _ = _efficient_trainer(tmp_path, tokenizer, mixture_file, keep_sources="0")
+    args_class = type(trainer.args)
+    monkeypatch.setattr(args_class, "world_size", property(lambda self: 2))
+    pool = next(iter(trainer.get_train_dataloader()))["examples"]
+    order = sorted(range(len(pool)), key=lambda i: len(pool[i]))  # 16 examples, the whole budget
+    indices = [order[-1 - k // 2] if k % 2 == 0 else order[k // 2] for k in range(len(pool))]
+    assert len(indices) == trainer._per_rank(trainer.args.pool_micro_batches) * 2
+    trainer._choose = lambda *_: (indices, [1.0] * len(indices))
+    # Rank 1 receives the broadcast of rank 0: one process stands in for both.
+    monkeypatch.setattr(trainers, "broadcast_object", lambda _: (indices, [1.0] * len(indices)))
+    trained = []
+    for rank in (0, 1):
+        monkeypatch.setattr(args_class, "process_index", property(lambda self, r=rank: r))
+        sub_batches, total = trainer._select({"examples": pool, "lengths": None})
+        trained.append(
+            sorted(sum((b["cu_seq_lens_q"].diff().tolist() for b, _ in sub_batches), []))
+        )
+    tokens = [sum(t) for t in trained]
+    round_robin = [sum(len(pool[i]) for i in indices[r::2]) for r in (0, 1)]
+    assert sorted(trained[0] + trained[1]) == sorted(len(pool[i]) for i in indices)
+    assert abs(tokens[0] - tokens[1]) <= max(len(e) for e in pool)
+    assert abs(tokens[0] - tokens[1]) < abs(round_robin[0] - round_robin[1])
+
+
 # ---------------------------------------------------------------------------------------------
 # O8: all selected examples in one forward = the micro-batch loop
 # ---------------------------------------------------------------------------------------------

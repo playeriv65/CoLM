@@ -39,6 +39,7 @@ def run(case: str, data: str, out: str, gas_scale: int = 1, steps: int = 2) -> d
                 {
                     "step": trainer.state.global_step,
                     "indices": batch["colm_meta"]["indices"].tolist(),
+                    "lengths": batch["cu_seq_lens_q"].diff().tolist(),
                 }
             )
         return out

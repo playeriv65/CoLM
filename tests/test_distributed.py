@@ -8,13 +8,15 @@ from pathlib import Path
 
 import pytest
 import torch
+from dist_eval_worker import run as evaluate
 from dist_worker import run
 
 WORKER = Path(__file__).with_name("dist_worker.py")
+EVAL_WORKER = Path(__file__).with_name("dist_eval_worker.py")
 STEPS = 2
 
 
-def _launch(tmp_path, data, case, world):
+def _launch(tmp_path, data, case, world, worker=WORKER):
     env = {**os.environ, "CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"}
     port = 29700 + (os.getpid() + world * 7 + (case == "regular")) % 200
     cmd = [
@@ -25,8 +27,8 @@ def _launch(tmp_path, data, case, world):
         str(world),
         "--master_port",
         str(port),
-        str(WORKER),
-        case,
+        str(worker),
+        *([case] if worker == WORKER else []),
         data,
         str(tmp_path),
     ]
@@ -34,10 +36,10 @@ def _launch(tmp_path, data, case, world):
     return [json.loads((tmp_path / f"rank{r}.json").read_text()) for r in range(world)]
 
 
-def _per_step(trained):
+def _per_step(trained, key="indices"):
     steps = {}
     for t in trained:
-        steps.setdefault(t["step"], []).extend(t["indices"])
+        steps.setdefault(t["step"], []).extend(t[key])
     return steps
 
 
@@ -54,15 +56,17 @@ def test_ranks_agree_with_one_process(tmp_path, mixture_file, case, world):
     assert all(r["steps"] == STEPS for r in ranks)
     for step in range(STEPS):
         shares = [p[step] for p in per_rank]
-        assert len({len(s) for s in shares}) == 1  # equal work on every rank
+        assert all(shares)  # every rank trains something (a rank without a backward would hang DDP)
         union = [i for s in shares for i in s]
         assert len(union) == len(set(union))  # disjoint shares
         # The pool of `world` ranks is the pool of one rank world times as large, in the same
         # order, so the selection is the same set of examples.
         assert sorted(union) == sorted(reference[step]), f"step {step}"
-        # Every rank gets the same mixture: the kept-source examples (id 0) are spread evenly.
-        kept = [sum(i % 4 == 0 for i in s) for s in shares]
-        assert max(kept) - min(kept) <= 1, kept
+        # Equal work: the token counts of the ranks differ by less than the longest example
+        # (the guarantee of longest-first assignment); round-robin shares do not have it.
+        lengths = [_per_step(r["trained"], "lengths")[step] for r in ranks]
+        tokens = [sum(x) for x in lengths]
+        assert max(tokens) - min(tokens) <= max(max(x) for x in lengths), tokens
     # DDP: identical weights on every rank, equal to the single-process weights.
     for r in ranks[1:]:
         for name, values in r["lora"].items():
@@ -87,3 +91,13 @@ def test_check_replicas_compares_the_ranks(tmp_path, mixture_file):
     assert (
         all(r["replicas"] == ranks[0]["replicas"] for r in ranks) and len(ranks[0]["replicas"]) == 2
     )
+
+
+@pytest.mark.parametrize("world", [2, 3])
+def test_evaluation_loss_is_sharded_over_the_ranks_without_changing_it(
+    tmp_path, mixture_file, world
+):
+    ranks = _launch(tmp_path, mixture_file, "", world, EVAL_WORKER)
+    single = evaluate(mixture_file)
+    for result in ranks:  # every rank holds the pooled result, equal to the single-process one
+        assert result == json.loads(json.dumps(single))

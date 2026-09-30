@@ -356,12 +356,14 @@ class CoresetTrainer(_Trainer):
                 selection = self._choose(pool, sources, gathered, budget)
         with t.section("scatter"):
             indices, weights = broadcast_object(selection)
-        # Round-robin, so that every rank gets the same mixture (the list starts with the examples
-        # of the kept sources).
-        mine = slice(rank, None, world)
-        total = self.batching.total_labels([pool[i] for i in indices])
-        chosen_examples = [pool[i] for i in indices[mine]]
-        sub_batches = self.batching.train_batches(chosen_examples, weights[mine])
+        # The step loss is a sum over all selected examples, so which rank trains which one does
+        # not change it; the step lasts as long as the rank with the most tokens (the gradient
+        # all-reduce waits for it). Token-balanced shares, the same on every rank.
+        chosen = [pool[i] for i in indices]
+        total = self.batching.total_labels(chosen)
+        mine = balanced_shares([len(e) for e in chosen], np.ones(len(chosen), bool), world)[rank]
+        chosen_examples = [chosen[j] for j in mine]
+        sub_batches = self.batching.train_batches(chosen_examples, [weights[j] for j in mine])
         t.count("train_tokens", sum(len(e) for e in chosen_examples))
         t.count("train_packs", len(sub_batches))
         return sub_batches, total

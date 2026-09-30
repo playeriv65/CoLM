@@ -35,6 +35,7 @@ from colm.data.get_training_dataset import (
 from colm.data.holdout import select_examples, split_holdout
 from colm.eval.arguments import GSM8K_SET, HELDOUT_SET, HeldoutEvalArguments
 from colm.phases import CLOCK
+from colm.selection.pool import all_reduce_sum, rank_and_world
 
 logger = logging.getLogger(__name__)
 
@@ -148,15 +149,22 @@ def evaluate_loss(
     device,
     autocast=contextlib.nullcontext,
 ) -> dict:
-    """Pooled mean token NLL of `dataset` (plus per-source breakdown and counts)."""
+    """Pooled mean token NLL of `dataset` (plus per-source breakdown and counts).
+
+    With several ranks (a process group) every rank evaluates every `world`-th batch and the
+    per-example sums are added up: each example goes through the same batch as in one process,
+    so the result is the same, and the time falls with the number of ranks. A collective: all
+    ranks must call it.
+    """
     collator = SupervisedCollator(tokenizer)
     # Length-sorted batches keep padding small; the result does not depend on the batching.
     order = sorted(
         range(len(dataset)), key=lambda i: len(dataset.sources[i]) + len(dataset.targets[i])
     )
+    rank, world = rank_and_world()
     nll_sum = torch.zeros(len(dataset), dtype=torch.float64)
     tok_count = torch.zeros(len(dataset), dtype=torch.int64)
-    for start in range(0, len(order), batch_size):
+    for start in range(rank * batch_size, len(order), world * batch_size):
         chunk = order[start : start + batch_size]
         batch = collator([dataset[i] for i in chunk])
         nll, count = label_nll(
@@ -169,6 +177,8 @@ def evaluate_loss(
         idx = torch.tensor(chunk)
         nll_sum[idx] = nll.cpu()
         tok_count[idx] = count.cpu()
+    nll_sum = all_reduce_sum(nll_sum, device)
+    tok_count = all_reduce_sum(tok_count, device)
 
     total_tokens = int(tok_count.sum())
     counted = tok_count > 0
@@ -235,9 +245,8 @@ class EvalLossCallback(TrainerCallback):
             self._evaluate(state.global_step)
 
     def _evaluate(self, step: int) -> None:
+        """A collective: every rank evaluates its share of the batches, rank 0 records."""
         trainer = self.trainer
-        if not trainer.is_world_process_zero():
-            return
         # Peaks are reset at the start of every training phase, so this cannot hide a training peak.
         started = time.time()
         memory = {}
@@ -257,6 +266,14 @@ class EvalLossCallback(TrainerCallback):
         if torch.cuda.is_available():
             memory["eval_peak_gb"] = torch.cuda.max_memory_allocated() / 1024**3
             memory["eval_peak_reserved_gb"] = torch.cuda.max_memory_reserved() / 1024**3
+        if trainer.is_world_process_zero():
+            self._record(step, results, memory)
+        if torch.cuda.is_available():
+            # Free the evaluation's cached blocks; otherwise the training phase inherits them.
+            torch.cuda.empty_cache()
+        CLOCK.add("train/eval_loss", time.time() - started)
+
+    def _record(self, step: int, results: dict, memory: dict) -> None:
         logs = {}
         for name, result in results.items():
             logs[f"eval_{name}_loss"] = round(result["loss"], 6)
@@ -268,11 +285,7 @@ class EvalLossCallback(TrainerCallback):
         with open(self.out_file, "a") as f:
             for name, result in results.items():
                 f.write(json.dumps({"step": step, "set": name, **result, **memory}) + "\n")
-        trainer.log(logs)
-        if torch.cuda.is_available():
-            # Free the evaluation's cached blocks; otherwise the training phase inherits them.
-            torch.cuda.empty_cache()
-        CLOCK.add("train/eval_loss", time.time() - started)
+        self.trainer.log(logs)
 
 
 def add_eval_loss_callback(

@@ -1,5 +1,6 @@
 """The selection pool: examples of one optimizer step, exchanged between ranks and re-batched."""
 
+import torch
 import torch.distributed as dist
 
 from colm.selection.packing import META
@@ -25,6 +26,25 @@ def gather_object(obj) -> list | None:
     out = [None] * dist.get_world_size() if dist.get_rank() == 0 else None
     dist.gather_object(obj, object_gather_list=out, dst=0)
     return out
+
+
+def rank_and_world() -> tuple[int, int]:
+    """(rank, world size) of this process; (0, 1) without a process group."""
+    if not distributed():
+        return 0, 1
+    return dist.get_rank(), dist.get_world_size()
+
+
+def all_reduce_sum(tensor: torch.Tensor, device) -> torch.Tensor:
+    """Sum of `tensor` over the ranks (a copy; the input is returned as it is in one process).
+
+    NCCL reduces CUDA tensors only, so a CPU tensor is staged on `device` and comes back on CPU.
+    """
+    if not distributed():
+        return tensor
+    staged = tensor.to(device) if dist.get_backend() == "nccl" else tensor.clone()
+    dist.all_reduce(staged)
+    return staged.to(tensor.device)
 
 
 def broadcast_object(obj):
