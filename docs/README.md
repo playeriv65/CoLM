@@ -13,7 +13,9 @@ for a decision.
 | Why is a step this fast, what is measured and what is left (O-numbers, F-findings, timing protocol)? | `optimization-backlog.md` |
 | What does the FP16 selection prefix change, and what did it cost / save? | `fp16-prefix.md` |
 | How accurate must the selection forward be (arms R / F / P / H, learning runs, recommendation)? | `selection-precision.md` |
+| In which precision does the upstream code really run its selection and training? | `upstream-precision.md` |
 | Where does the time of a whole job go (start-up, tokenisation, evaluation, saves) and what was cached? | `startup-overhead.md` |
+| How was the refactor designed (historical notes, 2026-09-28)? | `history/refactor-plan-2026-09-28.md` |
 
 Measurement scripts live in `../scripts/diagnostics/`; each has a header saying what it measured and
 which document holds the result. Raw logs, npz files and run directories are never committed: they

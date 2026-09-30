@@ -33,6 +33,51 @@ GAS 8, `small_batch_ratio` 0.5, efficient MeZO on `layers.31.self_attn.v_proj.lo
 327,680 params, `zo_dim` 2560, l1 facility location, proportional per source, `mezo_optim=adam`).
 Per rank: 32 examples forwarded for selection, 16 trained (8 micro-batches of 2).
 
+## Speed-up ledger (phi-2, 1 GPU, `profile_timing=fine`)
+
+One line per step of the path from the ported upstream behaviour to the current default; each
+number is one run, and not every run was clean (see the caveats).
+
+| stage | ms / step | what changed |
+|---|---:|---|
+| upstream behaviour, ported (512-truncated, padded) | 2868 | baseline of "Measured baseline" below |
+| refactor | 2329 | no padding, lm_head at label positions only |
+| exact optimisations | 1324 | skip unused MeZO features (27.5 % of the pool's examples), one packed training forward, scalar gather, host overhead |
+| training pack budget 1536 tokens | 1382 | memory back to 32 GB (one pack per step: 57-62 GB) |
+| stock attention (`flash_attention_2` + `sdpa`) | 1425 | +3.7 % against the custom kernels |
+| fp16 selection prefix | 1011 | measured at load average 141-145; 0.92 s on a clean machine |
+| fp32 tail of 2 blocks (default) | ~957 | +3.6 %, estimate from per-layer prefix timings (`docs/fp16-prefix.md`) |
+
+Where the ~1910 ms (2868 -> ~957) went. These are estimates; they sum to 2070 ms because the refactor
+made training 160 ms slower (1079 against 917 ms: smaller forwards, more of them):
+
+| item | ms saved |
+|---|---:|
+| training in one packed forward (O8) | ~660 |
+| no padding + lm_head at label positions | ~650 |
+| fp16 prefix | ~410 |
+| skipping kept-source examples (O1) | ~290 |
+| scalar gather + host overhead (O3, H) | ~60 |
+
+Caveats. The baseline is the ported old behaviour on the new stack (torch 2.13, transformers 5.17),
+not the upstream stack. The new code processes 5-7 % more real tokens per step (nothing is truncated,
+`docs/errors.md` E4b), so the speed-up in tokens per second is slightly larger than in ms per step.
+Several timings were not clean: the fp16-prefix run had load average 141-145, the stock-attention
+run 22-35, and the runs used different GPUs (cross-GPU, cross-run comparisons).
+
+## Training memory model
+
+Peak allocated memory of the training phase ~= 19.4 GB fixed + ~6.5 MB x tokens of the largest
+single forward. The fixed part: fp32 weights 11.1 GB, fp16 autocast copies of them kept for the
+backward 5.6 GB, LoRA r=128 parameters, gradients and Adam state ~2.7 GB. The peak is set by the
+longest single example, because an example is never split: a 2048-token example gives ~32 GB
+(`train_max_tokens=1536` already puts one such example alone in a pack); the upstream 512-truncated
+micro-batches (at most 1024 tokens) peaked at 26.4 GB. Measured points are the budget table above
+and `docs/errors.md` (47.1 GB for two 2048-token examples in one forward). Options if memory ever
+binds (estimates, not measured): activation checkpointing on packs above a length (peak ~21 GB,
+~+30 % training compute on those steps), `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` for
+the reserved figure.
+
 ## Findings (read before optimising)
 
 - **F1 — selection features are rank one.** `zo_random_seed` is drawn once in `__init__` and
@@ -93,6 +138,7 @@ Per rank: 32 examples forwarded for selection, 16 trained (8 micro-batches of 2)
 | O11 | Last decoder layer of the ±eps calls: queries, attention output and MLP only at label positions (K/V for every token) | math-exact | **Not done**: needs a per-architecture layer (the replay is the model's own layer module); est. −20 ms of 1324. |
 | O12 | LoRA merged into the base weights for the fp32 selection forward (W + s·B·A per layer, once per step) | math-exact up to fp32 rounding | **Not done, measured candidate**: LoRA's skinny GEMMs and its scale/add passes are 27% of the prefix GPU time (profile below); merging costs ~20 ms per step; est. −150 ms of 1324. Needs the whole selection in one pack and non-destructive merged weights (E-drift). |
 | O13 | fp32 GEMM in the NN layout: `x @ W^T` runs at 54 TFLOP/s, `x @ Wt` (weights stored transposed) at 70 on this GPU | math-exact up to rounding | **Not done, measured**: est. −130 ms (the base GEMMs are 74% of the prefix); needs a second (transposed) copy of the weights or a custom linear. |
+| O14 | CUDA graph / `torch.compile(mode="reduce-overhead")` for the training forward + backward | math-exact | **Not done**. Obstacles: variable token counts and `cu_seqlens` (needs bucketing of the pack length), the GradScaler's host syncs, PEFT / HF Trainer wrapping, extra memory per captured graph. The upside is small now: packs of at least ~1.3k tokens saturate the GPU (1382 ms at 1.3k tokens per forward against 1383 unlimited; the old 450-token micro-batches cost 0.26 ms per trained token, packed forwards 0.13). Revisit if the memory mode at small budgets becomes a bottleneck. |
 
 ## Open decisions (user)
 

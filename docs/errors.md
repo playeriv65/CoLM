@@ -18,7 +18,7 @@ steps, GPU 2). Severity: **R** changes results, **M** changes memory / time only
 | E3 (R) | Every MeZO estimate calls `torch.manual_seed(zo_random_seed)` on the global RNG: the training RNG restarts from the same state at every step, on every rank. | RNG state at the first training micro-batch: identical hash in steps 0-3; identical on all ranks. | z from a private `torch.Generator`; the global RNG is untouched (`tests/test_trainers.py`). |
 | E-drift (R, tiny) | Parameters are perturbed in place (+eps, -2 eps, +eps), leaving rounding error. | fp32, 327,680 values: 3.0e-8 max after 8 estimates, 3.1e-5 after 1024 steps (2e-4 relative). | Out-of-place (`torch.func.functional_call`); the parameters are never written. |
 | E4a (R) | Prompt and completion are tokenised together; the prompt is masked by the length of its separate tokenisation. | **9.3%** of the examples (all PoT programs starting with `#`, `[`) have one token straddling the boundary: the first output token is never supervised and the training tokens differ from the inference prompt. | Prompt and completion tokenised separately and concatenated. |
-| E4b (R) | Every example is cut at 512 tokens. | **8.6%** (22,640 of 262,039) are cut, 22,554 lose the EOS and the final answer (math50k_camel 40%, MATH CoT 17.8%); 315 have no label token at all (NaN loss at batch size 1). | No truncation, and **no truncation option exists** (`max_seq_length`, `model_max_length`, the SuperGLUE left-truncation and every `truncation=True` are deleted; `tests/test_no_truncation.py` greps for them). The only limit is the context window of the model (`max_position_embeddings`, 2048 for phi-2); examples above it (**31**) are dropped, counted per source in the log, in every data path (instruction/output, LESS prompt/completion and messages, SuperGLUE training, held-out and GSM8K eval loss); SuperGLUE evaluation fails fast (`PromptTooLong`) instead of cutting a prompt, and the accuracy evaluation has no prompt cut (`--max_new_tokens` only sets the generation length). Examples without a completion are dropped. |
+| E4b (R) | Every example is cut at 512 tokens. | **8.6%** (22,554 of 262,039) are cut and lose the EOS and the final answer (math50k_camel 40%, MATH CoT 17.8%); 315 have no label token at all (NaN loss at batch size 1). Exact statistics below. | No truncation, and **no truncation option exists** (`max_seq_length`, `model_max_length`, the SuperGLUE left-truncation and every `truncation=True` are deleted; `tests/test_no_truncation.py` greps for them). The only limit is the context window of the model (`max_position_embeddings`, 2048 for phi-2); examples above it (**31**) are dropped, counted per source in the log, in every data path (instruction/output, LESS prompt/completion and messages, SuperGLUE training, held-out and GSM8K eval loss); SuperGLUE evaluation fails fast (`PromptTooLong`) instead of cutting a prompt, and the accuracy evaluation has no prompt cut (`--max_new_tokens` only sets the generation length). Examples without a completion are dropped. |
 | E5 (R, reporting) | The logged loss is divided by `small_batch_ratio`. | Logged / trained loss = 2.000. | The logged loss is the loss being minimised. |
 | E7 (M/R) | The selected list `[kept..., class-0 picks, ...]` is cut into contiguous per-rank slices. | 2-rank run: rank 0 trains 75% kept-source examples, rank 1 37.5%. | Round-robin: every rank gets the same mixture. |
 | E8 (R, eval) | The held-out set is drawn by row. | 20% of MathInstruct rows share their question with another row (CoT and PoT solutions, several sources): **21%** of a random held-out set have their question in the training part. | Whole groups of the same question are held out (`colm/data/holdout.py`). |
@@ -29,6 +29,29 @@ steps, GPU 2). Severity: **R** changes results, **M** changes memory / time only
 | E16 (R) | The SuperGLUE option / candidate is counted back from the padded width, so shorter examples lose option tokens. | `tests/test_superglue.py`. | Counted from the real length. |
 | E17 (R, eval) | `sample_subset(num=-1)` (the whole validation split) drops the last sample of the shuffled order (`index[:num]` with `num=-1`). | `colm-eval superglue` scored CB on 55 of 56, RTE on 276 of 277 examples. | Every sample is returned (`tests/test_superglue.py`). |
 | MG (R) | `masked_grad` scales the per-example gradient by 1 / (selected examples of the rank), while the real gradient is the mean over all ranks. | Off by the number of GPUs. | 1 / (selected per rank x ranks). |
+
+### E4b: what the 512-token cut removed (upstream template, phi-2 tokenizer, 262,039 examples)
+
+22,554 examples (8.61 %) are truncated at 512 tokens; 5,545,065 of the 40,180,016 completion tokens
+are lost (13.80 %). Among the truncated examples the answer is cut by 34 % on average (median 33 %):
+14,071 lose at least 25 % of it (5.4 % of all examples), 5,254 at least 50 % (2.0 %), 716 at least
+75 % (0.27 %), and 315 keep no answer token. Every truncated example loses the EOS and the final
+answer sentence. Per source:
+
+| source | examples truncated (%) | answer tokens lost (%) |
+|---|---:|---:|
+| CoT/math50k_camel | 40.1 | 25.2 |
+| CoT/MATH_train | 17.8 | 20.0 |
+| CoT/TheoremQA | 13.5 | 9.9 |
+| PoT/TheoremQA | 3.8 | 4.4 |
+| CoT/college_math | 3.8 | 1.7 |
+| PoT/numglue | 1.2 | 0.5 |
+| PoT/MATH_train | 1.0 | 0.9 |
+| CoT/aqua_rat | 0.3 | 0.3 |
+| all other sources | 0 | 0 |
+
+Now nothing is cut; the examples above the model context (2048 tokens for Phi-2) are dropped: 31
+examples (0.012 %) and 56,566 completion tokens (0.14 %).
 
 Not an error, kept: the algorithm of the selection (E1). One fixed random direction z makes every
 feature `g_i z`: after the Adam transform facility location is a 1-D k-medoids on `f(g_i)`, so the
