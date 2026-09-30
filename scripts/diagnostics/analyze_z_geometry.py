@@ -17,7 +17,7 @@ Parts (`--parts`):
             design variants, `z0` (the code: fixed z, exact directional derivative), `z0_fd` /
             `z0_fd_rev` (the code's finite-difference estimate, pool packed in order / reversed:
             its repeat noise), `fresh` / `fresh_b` (new z every step, two independent draws),
-            `fresh_sgd`, `m4` / `m16` / `m64` (m shared directions per step, features = the m
+            `fresh_sgd`, `m4` / `m16` / `m64` / `m256` (m shared directions per step, features = the m
             directional derivatives), `m16_fixed`, `perex` (a different z per example: a control
             whose features are not comparable). Reported: overlap of the picks with the oracle's
             against random-within-candidates, agreement between variants, correlation of the
@@ -292,11 +292,14 @@ def weighted_error(G, indices, weights, pool_mean):
     return float((mean - pool_mean).norm() / pool_mean.norm())
 
 
-def rank1_energy(X, y):
-    """Mean over the sources of the energy share of the first singular value of their features."""
+def rank1_energy(X, y, centered=False):
+    """Mean over the sources of the energy share of the first singular value of their features
+    (`centered`: after removing the mean feature of the source, i.e. the variation between examples)."""
     shares = []
     for c in np.unique(y):
         block = X[np.where(y == c)[0]].double()
+        if centered:
+            block = block - block.mean(0)
         if len(block) >= 3:
             sv = torch.linalg.svdvals(block) ** 2
             shares.append(float(sv[0] / sv.sum()))
@@ -370,6 +373,7 @@ def build_chains(z0, rng, d):
         Chain("m4", make_multi(4, seed + 4), zo_dim=4),
         Chain("m16", make_multi(16, seed + 5), zo_dim=16),
         Chain("m64", make_multi(64, seed + 6), zo_dim=64),
+        Chain("m256", make_multi(256, seed + 8), zo_dim=256),
         Chain("m16_fixed", make_multi(16, seed + 7, fixed=True), zo_dim=16),
         Chain("perex", perex),
     ]
@@ -395,6 +399,8 @@ def steps(pools128, z0, rng):
     }
     geo = {n: {"pearson": [], "spearman": [], "vs_true_l2_spearman": []} for n in names}
     rank1 = {n: [] for n in names}
+    rank1c = {n: [] for n in names}
+    overlap_l2 = {n: [] for n in names}
     mask_z = []
     pair_agree = {}
     random_expect, picks_count = [], []
@@ -420,6 +426,7 @@ def steps(pools128, z0, rng):
         for chain in chains:
             chain.step(t, pool, {})
         oracle = chains[0]
+        full_l2 = next(c for c in chains if c.name == "oracle_full_l2")
         true_l2 = within_source_distance(pool.G, sources, keep)
         ref = within_source_l1(oracle.X, oracle.y)
         for chain in chains:
@@ -435,6 +442,8 @@ def steps(pools128, z0, rng):
                     geo[chain.name]["spearman"].append(s)
                     geo[chain.name]["vs_true_l2_spearman"].append(correlations(mine, true_l2)[1])
             rank1[chain.name].append(rank1_energy(chain.X, chain.y))
+            rank1c[chain.name].append(rank1_energy(chain.X, chain.y, centered=True))
+            overlap_l2[chain.name].append(len(set(chain.picks) & set(full_l2.picks)))
             match_w[chain.name].append(weighted_error(pool.G, chain.all, chain.weights, pool_mean))
         for a, b in (
             ("z0", "fresh"),
@@ -530,6 +539,11 @@ def steps(pools128, z0, rng):
             n: {kk: summarise(vv) for kk, vv in g.items()} for n, g in geo.items()
         },
         "rank1_energy_fraction_of_features": {n: summarise(v) for n, v in rank1.items()},
+        "rank1_energy_fraction_centered": {n: summarise(v) for n, v in rank1c.items()},
+        "skill_vs_oracle_full_l2": {
+            n: summarise((np.array(v, dtype=float) - expect) / (k - expect))
+            for n, v in overlap_l2.items()
+        },
         "z0_mask_mean_abs_z_of_selected_coordinates": summarise(mask_z),
         "z_mean_abs_expected": float(np.sqrt(2 / np.pi)),
         "gradient_matching_relative_error": {n: summarise(v) for n, v in match.items()},
