@@ -82,6 +82,10 @@ binds (estimates, not measured): activation checkpointing on packs above a lengt
 ~+30 % training compute on those steps), `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` for
 the reserved figure.
 
+Since the system audit (`docs/system-audit.md`) the fp16 autocast copies (5.6 GB) are gone and the frozen
+Linear weights of the first 29 layers are stored in fp16 (4.6 GB less): the same run peaks at 23.7 GB
+(training) / 8.7 GB (selection) instead of 32.3 / 13.1 GB, so the model above is ~9 GB lower in its fixed part.
+
 ## Findings (read before optimising)
 
 - **F1 — selection features are rank one.** `zo_random_seed` is drawn once in `__init__` and
