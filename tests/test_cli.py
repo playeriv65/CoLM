@@ -127,6 +127,10 @@ def test_unknown_keys_and_wrong_choices_fail_at_load(tmp_path):
         (dict(efficient_mezo=True, small_batch_ratio=0.1), "small_batch_ratio"),
         (dict(efficient_mezo=False), "per_device_train_batch_size=1"),
         (dict(small_batch_ratio=1.5), "small_batch_ratio"),
+        (dict(efficient_mezo=True, train_max_tokens=-1), "train_max_tokens must be >= 0"),
+        (dict(efficient_mezo=True, pack_tokens=-5), "pack_tokens must be >= 0"),
+        (dict(efficient_mezo=True, zo_dim=0), "zo_dim"),
+        (dict(efficient_mezo=True, mezo_eps=0.0), "mezo_eps"),
     ],
 )
 def test_inconsistent_selection_settings_fail_early(tmp_path, overrides, message):
@@ -177,6 +181,22 @@ def test_train_needs_gpus_and_builds_one_torchrun(tmp_path, monkeypatch):
     (log,) = tmp_path.glob("config-gpu2_3-np2-*.log")
     assert log.read_text().startswith("line\n")  # then the wall clock of the run
     assert "exit code 0" in log.read_text() and "COLM_LAUNCH_TIME" in started["env"]
+
+
+def test_the_launcher_passes_termination_on_to_torchrun():
+    import signal
+
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    before = signal.getsignal(signal.SIGTERM)
+    try:
+        with cli.forwarding_termination(child):
+            os.kill(os.getpid(), signal.SIGTERM)  # `kill <launcher>`
+            assert child.wait(timeout=30) == -signal.SIGTERM
+        assert (
+            signal.getsignal(signal.SIGTERM) == before
+        )  # the handler is only installed while it runs
+    finally:
+        child.kill()
 
 
 def test_eval_accuracy_gets_the_paper_protocol(tmp_path):

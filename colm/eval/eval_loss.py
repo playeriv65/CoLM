@@ -296,6 +296,11 @@ def add_eval_loss_callback(
         return None
     with CLOCK.detail("eval_setup/tokenise_sets"):
         sets = build_eval_sets(eval_args, trainer.processing_class, heldout, context_length)
+    late = sorted(s for s in eval_args.eval_loss_steps if s > trainer.args.max_steps > 0)
+    if late:
+        logger.warning(
+            f"eval_loss_steps {late} are beyond max_steps={trainer.args.max_steps}: never run"
+        )
     callback = EvalLossCallback(
         trainer,
         sets,

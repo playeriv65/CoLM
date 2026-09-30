@@ -60,6 +60,12 @@ class PackedBatching:
             )
         return f"train_max_tokens={self.train_tokens}: lower it to reduce the activation memory."
 
+    def selection_hint(self) -> str:
+        return (
+            f"the selection forward packs {self.select_tokens} tokens per forward "
+            "(`pack_tokens`, 0 = the tokens of one padded micro-batch): lower it."
+        )
+
     def total_labels(self, examples: list[Example]) -> int:
         return sum(e.num_labels for e in examples)
 

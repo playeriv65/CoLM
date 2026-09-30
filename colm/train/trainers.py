@@ -17,7 +17,6 @@ import time
 import numpy as np
 import torch
 from transformers import PreTrainedModel, Trainer
-from transformers.trainer_utils import get_last_checkpoint
 
 from colm.data.superglue import classification_loss
 from colm.selection.batching import UNLIMITED, PackedBatching
@@ -33,6 +32,7 @@ from colm.selection.pool import (
 from colm.selection.select import CoresetSelector
 from colm.selection.zo import zo_parameters
 from colm.train.memory import MemoryMeter
+from colm.train.preflight import check_resumable, newest_complete_checkpoint
 from colm.train.selection_state import (
     SelectionStateCallback,
     load_selection_state,
@@ -110,6 +110,22 @@ class _Trainer(Trainer):
 
     def describe(self) -> dict:
         return {"attn_implementation": self.train_attn}
+
+    def train(self, resume_from_checkpoint=None, *args, **kwargs):
+        """`Trainer.train`; a resume is checked first (a complete checkpoint, the newest complete
+        one for `True`) and the trainer restores what it keeps outside the checkpoint's model."""
+        checkpoint = resume_from_checkpoint
+        if checkpoint is True:  # the stock Trainer would take the newest directory, complete or not
+            checkpoint = newest_complete_checkpoint(self.args.output_dir)
+            if checkpoint is None:
+                raise ValueError(f"no complete checkpoint in {self.args.output_dir} to resume from")
+        if checkpoint:
+            check_resumable(checkpoint)
+            self.restore(checkpoint)
+        return super().train(checkpoint or resume_from_checkpoint, *args, **kwargs)
+
+    def restore(self, checkpoint: str) -> None:
+        """Load the trainer's own state from `checkpoint` before the first resumed step."""
 
     def set_attention(self, implementation: str) -> None:
         """Attention implementation of the next forwards (a no-op when it is already set)."""
@@ -261,14 +277,10 @@ class CoresetTrainer(_Trainer):
             "selection_prefix_fp32_tail": getattr(self.extractor, "fp32_tail", "not_applicable"),
         }
 
-    def train(self, resume_from_checkpoint=None, *args, **kwargs):
-        """`Trainer.train`; on a resume the selection moments come back before the first step."""
-        checkpoint = resume_from_checkpoint
-        if checkpoint is True:  # the stock Trainer resolves `True` to the newest checkpoint
-            checkpoint = get_last_checkpoint(self.args.output_dir)
-        if checkpoint and self.args.process_index == 0:
+    def restore(self, checkpoint: str) -> None:
+        """The selection moments come back on rank 0, the only rank that selects."""
+        if self.args.process_index == 0:
             load_selection_state(self.selector, checkpoint, self.zo_seed, self.args.device)
-        return super().train(resume_from_checkpoint, *args, **kwargs)
 
     # ----- budgets and sub-batches (differ between the two coreset trainers) --------------
     def _check_args(self):
@@ -345,7 +357,14 @@ class CoresetTrainer(_Trainer):
                     self._prepare_inputs(b)
                     for b in self.batching.feature_batches([pool[i] for i in positions])
                 ]
-            values = torch.cat([self._features(b) for b in batches]) if batches else torch.zeros(0)
+            try:
+                values = (
+                    torch.cat([self._features(b) for b in batches]) if batches else torch.zeros(0)
+                )
+            except torch.OutOfMemoryError as error:
+                raise torch.OutOfMemoryError(
+                    f"{error}\n{self.batching.selection_hint()}"
+                ) from error
             with t.fine("to_cpu"):
                 values = values.cpu()
         with t.section("gather"):

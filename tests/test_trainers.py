@@ -344,3 +344,17 @@ def test_resume_with_another_zo_seed_fails(tmp_path, tokenizer, mixture_file, mo
     trainer.zo_seed += 1
     with pytest.raises(ValueError, match="zo_seed"):
         trainer.train(resume_from_checkpoint=str(tmp_path / "part" / f"checkpoint-{RESUME_AT}"))
+
+
+def test_resume_true_takes_the_newest_complete_checkpoint(
+    tmp_path, tokenizer, mixture_file, monkeypatch
+):
+    _run(tmp_path, tokenizer, mixture_file, monkeypatch, "part", interrupt=True)
+    broken = tmp_path / "part" / f"checkpoint-{RESUME_AT + 1}"  # a save that was killed
+    broken.mkdir()
+    (broken / "adapter_model.safetensors").write_bytes(b"")
+    rest, _, picked = _run(tmp_path, tokenizer, mixture_file, monkeypatch, "part", resume=True)
+    assert rest.state.global_step == RESUME_STEPS
+    assert set(picked) == set(range(RESUME_AT, RESUME_STEPS))
+    with pytest.raises(FileNotFoundError, match="not a complete checkpoint"):
+        _run(tmp_path, tokenizer, mixture_file, monkeypatch, "other", resume=str(broken))

@@ -426,6 +426,10 @@ def test_the_budget_is_a_bounded_default_and_out_of_memory_says_what_to_set(
     trainer.batching.train_tokens = UNLIMITED
     with pytest.raises(torch.OutOfMemoryError, match="set train_max_tokens to a positive value"):
         trainer._train_packs(model, sub_batches, 1)
+    # the selection forward names its own budget
+    monkeypatch.setattr(trainer, "_features", out_of_memory)
+    with pytest.raises(torch.OutOfMemoryError, match="`pack_tokens`"):
+        trainer._select({"examples": examples, "lengths": None})
 
 
 def test_train_batches_pack_the_selection_under_the_token_budget(tmp_path, tokenizer, mixture_file):

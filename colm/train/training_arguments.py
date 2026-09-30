@@ -252,6 +252,13 @@ class TrainingArguments(HFTrainingArguments):
                 f"selection_prefix_dtype=float16 (got {self.selection_prefix_dtype}); "
                 "set selection_prefix_fp32_tail=0 for an fp32 prefix"
             )
+        for name in ("pack_tokens", "train_max_tokens"):  # 0 = the documented alternative
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} must be >= 0, got {getattr(self, name)}")
+        if self.zo_dim < 1 or self.mezo_eps <= 0:
+            raise ValueError(
+                f"zo_dim must be >= 1 and mezo_eps > 0, got {self.zo_dim}, {self.mezo_eps}"
+            )
         if not 0 < self.small_batch_ratio <= 1:
             raise ValueError(f"small_batch_ratio must be in (0, 1], got {self.small_batch_ratio}")
         if self.efficient_mezo:

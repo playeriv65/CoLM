@@ -31,6 +31,7 @@ from colm.train.config import context_length, parse_args, resolved_config, save_
 from colm.train.data_arguments import get_data_statistics
 from colm.train.model_arguments import add_padding_to_tokenizer
 from colm.train.phase_callback import PhaseCallback
+from colm.train.preflight import check_disk_space, checkpoint_bytes, planned_saves
 from colm.train.trainers import CustomTrainer, SubsetTrainer, SubsetTrainerEfficient
 
 logger = logging.getLogger(__name__)
@@ -223,6 +224,12 @@ def main(argv=None):
     add_padding_to_tokenizer(tokenizer)
     CLOCK.mark("tokenizer")
     model = build_model(model_args, training_args, tokenizer)
+    if training_args.should_save:  # fail now, not at the first checkpoint minutes into the run
+        check_disk_space(
+            training_args.output_dir,
+            checkpoint_bytes(model.parameters(), training_args.save_only_model),
+            planned_saves(training_args),
+        )
     CLOCK.mark("model_load")
     train_dataset, collator, analysis_dataset, heldout = build_data(
         data_args, training_args, eval_args, tokenizer, context
@@ -276,6 +283,8 @@ def main(argv=None):
         CLOCK.save(
             os.path.join(training_args.output_dir, PHASES_FILENAME), steps=trainer.state.global_step
         )
+    if torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()  # a clean exit (NCCL warns otherwise)
 
 
 if __name__ == "__main__":
