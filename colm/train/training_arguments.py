@@ -154,6 +154,18 @@ class TrainingArguments(HFTrainingArguments):
             "model in fp32 (efficient_mezo off), nothing is converted. Off: fp32 weights."
         },
     )
+    train_fp32_tail: int = field(
+        default=0,
+        metadata={
+            "help": "Trailing decoder blocks of the TRAINING forward whose q_proj / k_proj (with "
+            "their LoRA) and attention run in fp32 instead of under fp16 / bf16 autocast "
+            "(`colm/train/precision.py`): autocast rounds q and k before the attention, and that "
+            "error (not the attention alone) corrupts the LoRA gradient of the last blocks. "
+            "Needs mixed precision and fp32 model weights. The model profile sets the CLI default "
+            "(Phi-2: 3, which cuts the relative L2 error of the gradient from 1.0 to 0.04 for "
+            "+6 percent step time; other profiles 0); an explicit flag or JSON value overrides it."
+        },
+    )
     data_selection_method: Literal["submodlib", "weightedsubmodlib", "none"] = field(
         default="submodlib",
         metadata={"help": "How to select the small batch from the large batch."},
@@ -260,6 +272,14 @@ class TrainingArguments(HFTrainingArguments):
 
     def _validate(self) -> None:
         """Fail fast on inconsistent selection settings."""
+        if self.train_fp32_tail < 0:
+            raise ValueError(f"train_fp32_tail must be >= 0, got {self.train_fp32_tail}")
+        if self.train_fp32_tail and not (self.fp16 or self.bf16):
+            raise ValueError(
+                f"train_fp32_tail={self.train_fp32_tail} is the fp32 tail of a mixed-precision "
+                "training forward: it needs --fp16 or --bf16 (set train_fp32_tail=0 for fp32 "
+                "training)"
+            )
         if not self.coreset:
             return
         if self.selection_prefix_fp32_tail < 0:

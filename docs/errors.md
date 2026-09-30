@@ -102,9 +102,10 @@ derivative). Every fp32 gradient comparison therefore uses `sdpa_kernel(MATH)`. 
 reference the fp16 training gradients are (relative error, cosine): stock fp16 sdpa, one example
 per forward 1.17 (0.65); `colm_varlen` (torch `varlen_attn`, flash), one pack of 16 examples 0.44
 (0.90), one example per forward 0.41 (0.94). The earlier numbers above (1.13 and 0.71) used the
-EFFICIENT fp32 gradient as reference. The fp16 gradient error remains the pending precision
-decision, not a packing effect. Where the error sits (blocks 29-31, q/k
-projections plus attention) and what removing it costs: `training-precision.md`.
+EFFICIENT fp32 gradient as reference. The fp16 gradient error is not a packing effect. It sits in the q/k
+projections plus the attention of the last three blocks; **fixed** (2026-09-29) by the
+`train_fp32_tail` option (Phi-2 profile: 3), which brings it to 0.04 (cosine 0.999) for about
++6 % step time: `training-precision.md`.
 
 Bug found on the way (with the former custom attention): under autocast the rotary embedding leaves
 q and k in fp32 and v in fp16; the packed kernels read garbage (NaN, illegal memory access) until

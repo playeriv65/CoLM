@@ -118,6 +118,20 @@ are no other launch scripts: do not add shell wrappers, extend the entry points.
   `docs/fp16-prefix.md`); learning quality has not yet been compared. Packed
   inputs need `use_cache=False` (a cache ends the packed-batch detection of
   transformers).
+- The Phi-2 profile sets `train_fp32_tail=3` (`colm/train/precision.py`): in the TRAINING forward
+  + backward the q_proj / k_proj (with their LoRA) and the attention of the last 3 blocks run in
+  fp32 (autocast off, `sdpa` MATH with the packed-row block mask), the rest under autocast; the
+  fp16 gradient error against the exact fp32 gradient goes from 1.0 to 0.04 (cosine 0.999,
+  `docs/training-precision.md`). `TrainingPrecision.installed(key)` registers a dispatcher in
+  transformers' public `AttentionInterface` under the training implementation's own key (so
+  `set_attn_implementation` switching to the selection's `sdpa` is unaffected; the dispatcher
+  falls back to the wrapped function without `cu_seq_lens_q`, e.g. padded eval batches) and wraps
+  the forward of the tail's q/k projections; `running()` turns both on around the forward +
+  backward of a training step only (`_Trainer.training_step`, `CoresetTrainer._train_packs`), so
+  selection and evaluation never see them. Both are removed when `train()` returns. The frozen
+  q/k weights of the tail stay fp32 (`store_frozen_linears(..., keep_qk_last=k)`,
+  `check_tail` verifies the dtypes at load). 0 for other profiles; an explicit value needs
+  mixed precision over fp32 weights or fails at startup.
 - The Phi-2 profile sets `pack_tokens=1536` for selection. This is distinct
   from `train_max_tokens=1536`; JSON or CLI values override either budget.
   `--pack_tokens 0` restores the data-derived selection budget. The one-run

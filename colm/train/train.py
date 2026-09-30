@@ -32,6 +32,7 @@ from colm.train.data_arguments import get_data_statistics
 from colm.train.frozen_weights import fp32_layers_needed, store_frozen_linears
 from colm.train.model_arguments import add_padding_to_tokenizer
 from colm.train.phase_callback import PhaseCallback
+from colm.train.precision import check_tail
 from colm.train.preflight import check_disk_space, checkpoint_bytes, planned_saves
 from colm.train.trainers import CustomTrainer, SubsetTrainer, SubsetTrainerEfficient
 
@@ -217,14 +218,18 @@ def prepare_model(model, training_args) -> int:
             checkpoint_bytes(model.parameters(), training_args.save_only_model),
             planned_saves(training_args),
         )
+    tail = training_args.train_fp32_tail
+    check_tail(model, tail)  # the tail must fit in the model (fp32 q / k weights: checked below)
     keep = fp32_layers_needed(training_args)
-    if keep is None:
-        return 0
-    dtype = torch.float16 if training_args.fp16 else torch.bfloat16
-    freed = store_frozen_linears(model, dtype, keep)
-    logger.info(
-        f"Frozen Linear weights stored in {dtype} (last {keep} layers fp32): {freed / 1e9:.2f} GB freed"
-    )
+    freed = 0
+    if keep is not None:
+        dtype = torch.float16 if training_args.fp16 else torch.bfloat16
+        freed = store_frozen_linears(model, dtype, keep, keep_qk_last=tail)
+        logger.info(
+            f"Frozen Linear weights stored in {dtype} (last {keep} layers fp32, q/k projections "
+            f"of the last {tail} layers fp32): {freed / 1e9:.2f} GB freed"
+        )
+    check_tail(model, tail)  # the q / k weights of the tail are fp32 after the conversion
     return freed
 
 

@@ -54,6 +54,17 @@ explicit command-line or JSON value overrides the profile. The resolved run
 configuration records the selected mode, and an unsupported FP16-prefix/weight
 combination or a tail without the FP16 prefix fails at startup.
 
+The TRAINING forward has an FP32 tail of its own: `train_fp32_tail=k` runs the q/k
+projections (with their LoRA) and the attention of the last k blocks in FP32 instead
+of under FP16 autocast (`colm/train/precision.py`). Autocast rounds q and k inside the
+projections, which corrupts the LoRA gradient of the last three Phi-2 blocks: its error
+against the exact FP32 gradient is 1.0 (cosine 0.65) with the plain FP16 forward and
+0.04 (cosine 0.999) with the tail. The Phi-2 profile sets `train_fp32_tail=3` (+12 % of a
+pack's forward + backward, about +6 % step time, +0.7 GiB); other profiles 0;
+`--train_fp32_tail 0` restores the plain FP16 training forward. It needs FP16/BF16 autocast
+over FP32 model weights and fails at startup otherwise; see
+[`docs/training-precision.md`](docs/training-precision.md).
+
 W&B is off by default (`report_to="none"`, nothing imports `wandb`). To log a run, install the extra
 and pass `--report_to wandb` (optionally `--wandb_project/--wandb_entity/--wandb_notes`, or the
 `WANDB_*` environment variables).

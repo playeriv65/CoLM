@@ -15,6 +15,8 @@ steps, the seed and the selection arm differ:
     random_kept  the selector's structure with a random ranking: kept sources always trained,
             the other picks random inside each source with the selector's quotas
 
+`--train-fp32-tail k` sets the library option `train_fp32_tail` (without it the model profile's
+default applies, Phi-2: 3, so V0 below is no longer the fp16 training forward: pass 0 for that).
 `--train-attention Vk` runs the training forward with a per-layer attention precision of
 `measure_training_attention.py` (V0 = the library default, V5q = fp32 q/k projections and fp32
 attention in blocks 29-31; docs/training-precision.md); the selection is untouched.
@@ -50,6 +52,13 @@ def arguments():
     parser.add_argument(
         "--train-attention", default="V0", help="variant of measure_training_attention.py"
     )
+    parser.add_argument(
+        "--train-fp32-tail",
+        type=int,
+        default=None,
+        help="train_fp32_tail of the library (default: the model profile's, Phi-2: 3); 0 is the "
+        "former fp16 training forward (V0 of docs/training-precision.md)",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--steps", type=int, default=300)
     parser.add_argument("--eval-steps", type=int, nargs="+", default=[100, 200, 300])
@@ -71,6 +80,8 @@ def main():
     os.environ.update(local_kernel_env(spec))
     _, base = load_spec(SWEEP)
     attention = "" if args.train_attention == "V0" else f"-{args.train_attention}"
+    if args.train_fp32_tail is not None:
+        attention += f"-tail{args.train_fp32_tail}"
     name = f"{args.arm}{attention}-seed{args.seed}-{args.steps}steps"
     out = args.out_root / name
     out.mkdir(parents=True, exist_ok=True)
@@ -85,6 +96,7 @@ def main():
         "selection_prefix_fp32_tail": ARMS[args.arm][1],
         "output_dir": str(out),
         "run_name": name,
+        **({} if args.train_fp32_tail is None else {"train_fp32_tail": args.train_fp32_tail}),
     }
     config_path = out / "train_config.json"
     config_path.write_text(json.dumps(config, indent=1) + "\n")

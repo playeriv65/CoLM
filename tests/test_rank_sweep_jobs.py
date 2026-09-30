@@ -46,6 +46,7 @@ def test_real_sweep_spec_is_the_agreed_design():
     assert training.pool_micro_batches == 8 and training.efficient_mezo is True
     assert training.selection_prefix_dtype == "float16"
     assert training.selection_prefix_fp32_tail == 2
+    assert training.train_fp32_tail == 3  # the profile default reaches every arm
     assert training.pack_tokens == 1536 and training.train_max_tokens == 1536
     assert (
         training.seed == 0
@@ -134,8 +135,12 @@ def test_create_dry_run_prints_the_jobs_and_writes_nothing(tmp_path, capsys):
     queue = tmp_path / "queues" / "sweep"
     assert rank_sweep.main(["--sweep", SWEEP, "--queue", str(queue), "--dry-run"]) is None
     lines = capsys.readouterr().out.splitlines()
-    assert len(lines) == 18 and lines[0].startswith("000-evalloss-base: ")
-    assert lines[1].startswith("001-train-r128-a512: ") and lines[-1].startswith("017-summary: ")
+    jobs, resolved = lines[:18], lines[18:]
+    assert jobs[0].startswith("000-evalloss-base: ")
+    assert jobs[1].startswith("001-train-r128-a512: ") and jobs[-1].startswith("017-summary: ")
+    # one line per arm with the options colm-train resolves from the model profile
+    assert len(resolved) == 5 and resolved[0].startswith("resolved r128-a512: ")
+    assert all('"train_fp32_tail": 3' in line for line in resolved)
     assert not queue.exists()
 
 

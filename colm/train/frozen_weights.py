@@ -7,27 +7,37 @@ Phi-2 15 GB of memory traffic per forward (~9 ms) and 5.6 GB of saved copies, 8 
 Storing the weight once in the low dtype gives the same numbers, because autocast's cast is this
 very cast (round to nearest), and removes both. Layers that run in fp32 (the fp32 tail and the
 perturbed last layer of the selection), the head, the norms, the embeddings and every trainable
-tensor keep their dtype.
+tensor keep their dtype. So do the q / k projections of the last `train_fp32_tail` layers, which
+the training forward runs in fp32 (`colm/train/precision.py`).
 """
 
 import torch
 from torch import nn
 
+QK_PROJECTIONS = ("q_proj", "k_proj")
 
-def store_frozen_linears(model: nn.Module, dtype: torch.dtype, keep_last: int) -> int:
+
+def store_frozen_linears(
+    model: nn.Module, dtype: torch.dtype, keep_last: int, keep_qk_last: int = 0
+) -> int:
     """Convert the frozen fp32 `nn.Linear` modules of all but the last `keep_last` decoder layers
-    to `dtype` (weight and bias); returns the bytes of memory that this frees."""
+    to `dtype` (weight and bias), except the q / k projections of the last `keep_qk_last` layers;
+    returns the bytes of memory that this frees."""
     causal_lm = model.get_base_model() if hasattr(model, "get_base_model") else model
     layers = causal_lm.base_model.layers
-    if not 0 <= keep_last <= len(layers):
-        raise ValueError(f"keep_last must be in [0, {len(layers)}], got {keep_last}")
+    for name, value in (("keep_last", keep_last), ("keep_qk_last", keep_qk_last)):
+        if not 0 <= value <= len(layers):
+            raise ValueError(f"{name} must be in [0, {len(layers)}], got {value}")
     freed = 0
-    for layer in layers[: len(layers) - keep_last]:
-        for module in layer.modules():
+    for index, layer in enumerate(layers[: len(layers) - keep_last]):
+        keep_qk = index >= len(layers) - keep_qk_last
+        for name, module in layer.named_modules():
             if not isinstance(module, nn.Linear) or module.weight.dtype != torch.float32:
                 continue
             if any(p.requires_grad for p in module.parameters()):
                 continue  # LoRA A / B, or a layer being trained
+            if keep_qk and any(part in QK_PROJECTIONS for part in name.split(".")):
+                continue
             freed += sum(
                 p.numel() * (p.element_size() - dtype.itemsize) for p in module.parameters()
             )

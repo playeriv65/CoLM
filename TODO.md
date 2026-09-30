@@ -12,8 +12,10 @@ a document (`docs/README.md` is the index); measurements live in `docs/`, not he
 - [ ] **LoRA rank sweep v5** (design below). The queue is not created yet: `colm-sweep create --sweep
       configs/rank_sweep/sweep.json --queue queues/rank-sweep-v5`, then `colm-sweep work --queue
       queues/rank-sweep-v5 --gpu <id>` in tmux window `CoLM-rank-sweep`. The GPU is assigned by the
-      user. v5 = FP16 selection prefix with an FP32 tail of 2 blocks (the Phi-2 default). The v4
-      queue/outputs are the plain FP16 prefix (tail 0), a different arm: do not mix or resume them.
+      user. v5 = FP16 selection prefix with an FP32 tail of 2 blocks and an FP32 training tail of 3
+      blocks (`train_fp32_tail`; the Phi-2 defaults; `--dry-run` shows the resolved options). The
+      v4 queue/outputs are the plain FP16 prefix (selection tail 0, training tail 0), a different
+      arm: do not mix or resume them.
 - [ ] Make `math_eval` report loss as well as accuracy (accuracy only today).
 - [ ] System audit follow-ups (`docs/system-audit.md`, prioritised list at its end): measure a real 2/4-GPU
       run (needs GPUs assigned) to confirm the estimate for the paper setting and the eval sharding.
@@ -25,10 +27,11 @@ a document (`docs/README.md` is the index); measurements live in `docs/`, not he
 
 ## Decisions pending (user)
 
-- Precision of the recipe (fp16 attention gradients, `docs/errors.md`); D3-D4 of
-  `docs/optimization-backlog.md` (dropout for activation reuse, 1-D facility location).
+- D3-D4 of `docs/optimization-backlog.md` (dropout for activation reuse, 1-D facility location).
   Decided: D1 (mean over the example's label tokens), D2 (selection precision: fp16 prefix, fp32 tail
-  of 2, `docs/selection-precision.md`).
+  of 2, `docs/selection-precision.md`), D5 (training precision: fp32 q/k + attention in the last 3
+  blocks, `train_fp32_tail=3`, `docs/training-precision.md`; the fp16 attention gradient error of
+  `docs/errors.md` is fixed).
 - Whether the queue keeps the standalone `evalloss` job of every arm: the in-training evaluation
   already gives the same numbers at steps 512 / 1024 (agreement to 6e-5 was checked); the job
   costs ~1.3 min per arm (was 1.6 min before the token cache).

@@ -20,6 +20,8 @@ script-local replacement of the `flash_attention_2` entry of transformers' `Atte
     V5 / V5q  V1 / V1q + block 31 (blocks 29-31);  V5k  only q_proj / k_proj fp32 in 29-31 (flash stays fp16);
     V8q  blocks 28-31;  V6q  blocks 26-31;  V7  blocks 29-31 entirely fp32
     S<k>  (--scan) V1q for a single block k: which block carries the error
+    LIB3  the library path (`colm.train.precision.TrainingPrecision`, `train_fp32_tail=3`), the
+          implementation of V5q that ships; must reproduce V5q (docs/training-precision.md)
 
 The gradient is compared per pack (loss scaled as inside a step) and per step (sum of the packs of a
 step), relative L2 and cosine, in total and per parameter group (q/k/v/fc1/fc2 x layer range).
@@ -52,6 +54,7 @@ from transformers.modeling_utils import AttentionInterface
 
 from colm.data.get_training_dataset import tokenize_examples
 from colm.selection.packing import greedy_groups, label_positions, model_inputs, pack
+from colm.train.precision import TrainingPrecision
 from colm.train.training_arguments import TrainingArguments
 
 SWEEP = "configs/rank_sweep/sweep.json"
@@ -99,6 +102,7 @@ def variants(scan: list[int]) -> dict[str, dict]:
         "V8q": {"attn": set(range(28, 32)), "qk": set(range(28, 32))},
         "V6q": {"attn": set(range(26, 32)), "qk": set(range(26, 32))},
         "V7": {"block": {29, 30, 31}},
+        "LIB3": {"library_tail": 3},
     }
     for k in scan:
         v[f"S{k}"] = {"attn": {k}, "qk": {k}}
@@ -227,11 +231,14 @@ def gradient(model, params, batch, total_labels, scale, spec, checkpoint_min, de
     for p in params:
         p.grad = None
     positions, targets, segment = label_positions(batch)
-    with torch.autocast("cuda", dtype=torch.float16, enabled=CFG.autocast):
-        logits = model(**model_inputs(batch), logits_to_keep=positions).logits[0]
-    logits = logits.to(torch.promote_types(logits.dtype, torch.float32))
-    loss = F.cross_entropy(logits, targets, reduction="sum") / total_labels
-    (loss * scale).backward()
+    # `library_tail`: the fp32 tail of the library, installed for the whole forward + backward
+    tail = TrainingPrecision(model, spec.get("library_tail", 0))
+    with tail.installed(model.get_base_model().config._attn_implementation), tail.running():
+        with torch.autocast("cuda", dtype=torch.float16, enabled=CFG.autocast):
+            logits = model(**model_inputs(batch), logits_to_keep=positions).logits[0]
+        logits = logits.to(torch.promote_types(logits.dtype, torch.float32))
+        loss = F.cross_entropy(logits, targets, reduction="sum") / total_labels
+        (loss * scale).backward()
     grads = [p.grad.detach() / scale for p in params]
     for p in params:
         p.grad = None

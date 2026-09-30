@@ -39,6 +39,7 @@ def test_a_plain_run_uses_the_paper_training_recipe_and_profiled_selection(tmp_p
     assert training.fp16 and model.torch_dtype == "none"
     assert training.selection_prefix_dtype == "float16"
     assert training.selection_prefix_fp32_tail == 2
+    assert training.train_fp32_tail == 3  # fp32 q/k projections + attention in the last 3 blocks
     assert training.pack_tokens == 1536
     assert model.lora_target_modules == ["q_proj", "k_proj", "v_proj", "fc1", "fc2"]
     assert (model.lora_r, model.lora_alpha) == (128, 512)
@@ -247,6 +248,8 @@ def test_train_writes_the_resolved_config(tmp_path, tokenizer, mixture_file):
     resolved = json.loads((tmp_path / "out" / "resolved_config.json").read_text())
     assert resolved["training"]["small_batch_ratio"] == 0.5  # a default
     assert resolved["training"]["selection_prefix_fp32_tail"] == 0  # float32 prefix: no tail
+    assert resolved["training"]["train_fp32_tail"] == 0  # no mixed precision: no tail
+    assert resolved["derived"]["train_fp32_tail"] == 0
     assert resolved["training"]["max_steps"] == 1 and resolved["model"]["lora_r"] == 4
     derived = resolved["derived"]
     assert (

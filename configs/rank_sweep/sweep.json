@@ -28,7 +28,7 @@
         "limit": null
     },
     "summary_notes": [
-        "Single-GPU rank comparison with the fixed FP16 selection prefix (FP32 tail of 2 blocks), FP32 suffix, and 1536-token selection and training budgets. Evaluations run alone on the assigned GPU."
+        "Single-GPU rank comparison with the fixed FP16 selection prefix (FP32 tail of 2 blocks), FP32 suffix, FP32 q/k projections and attention in the last 3 blocks of the training forward (the Phi-2 profile's train_fp32_tail), and 1536-token selection and training budgets. Evaluations run alone on the assigned GPU."
     ],
     "env": {
         "HF_HUB_OFFLINE": "1",

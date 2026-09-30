@@ -122,6 +122,14 @@ def parse_args(argv: list[str] | None = None):
             extra.update(fp16=True, torch_dtype="none")
         else:
             extra.update(bf16=True, torch_dtype="bfloat16")
+    # The fp32 tail of the training forward needs mixed precision over fp32 weights (an explicit
+    # value that asks for it without them is an error at load).
+    mixed = model_args.precision != "fp32" and bool(
+        extra.get("fp16") or extra.get("bf16") or explicit
+    )
+    fp32_weights = extra.get("torch_dtype", model_args.torch_dtype) in ("none", "float32")
+    if "train_fp32_tail" not in defaults:
+        extra["train_fp32_tail"] = profile["train_fp32_tail"] if mixed and fp32_weights else 0
     return parse(DATACLASSES, extra)
 
 

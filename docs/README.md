@@ -15,7 +15,7 @@ for a decision.
 | What does the FP16 selection prefix change, and what did it cost / save? | `fp16-prefix.md` |
 | How accurate must the selection forward be (arms R / F / P / H, learning runs, recommendation)? | `selection-precision.md` |
 | In which precision does the upstream code really run its selection and training? | `upstream-precision.md` |
-| Which blocks make the fp16 TRAINING gradient inexact, and what does an fp32 q/k + attention tail cost? | `training-precision.md` |
+| Which blocks make the fp16 TRAINING gradient inexact, and what does the `train_fp32_tail` option (fp32 q/k + attention) cost? | `training-precision.md` |
 | Where does the time of a whole job go (start-up, tokenisation, evaluation, saves) and what was cached? | `startup-overhead.md` |
 | What did the second system audit find (multi-GPU scaling estimate, robustness, host tail latency, remaining candidates)? | `system-audit.md` |
 | How was the refactor designed (historical notes, 2026-09-28)? | `history/refactor-plan-2026-09-28.md` |

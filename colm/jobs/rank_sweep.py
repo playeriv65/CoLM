@@ -13,6 +13,7 @@ import argparse
 import json
 import subprocess
 import sys
+import tempfile
 from dataclasses import fields
 from pathlib import Path
 
@@ -57,6 +58,27 @@ def train_config(spec: dict, arm: dict, base_config: dict) -> dict:
         "lora_alpha": arm["lora_alpha"],
         "output_dir": arm_dir(spec, arm, base_config),
     }
+
+
+RESOLVED_OPTIONS = (
+    "selection_prefix_dtype",
+    "selection_prefix_fp32_tail",
+    "train_fp32_tail",
+    "pack_tokens",
+    "train_max_tokens",
+)
+
+
+def resolved_options(spec: dict, arm: dict, base_config: dict) -> dict:
+    """Precision and budget options of an arm's train job once `colm-train` has applied the model
+    profile to its config (what the run will use, defaults the sweep does not list included)."""
+    from colm.train.config import parse_args
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / TRAIN_CONFIG
+        path.write_text(json.dumps(train_config(spec, arm, base_config)))
+        training = parse_args([str(path)])[2]
+    return {name: getattr(training, name) for name in RESOLVED_OPTIONS}
 
 
 def _git_commit(repo: Path) -> str:
@@ -271,6 +293,8 @@ def main(argv=None):
         spec, base = load_spec(args.sweep)
         for position, job in enumerate(build_jobs(spec, base, args.sweep)):
             print(f"{position:03d}-{job['name']}: {' '.join(job['argv'])}")
+        for arm in spec["arms"]:
+            print(f"resolved {arm_label(arm)}: {json.dumps(resolved_options(spec, arm, base))}")
         return
     root = create_queue(args.sweep, args.queue, args.forbid_cache_prefix)
     queue = JobQueue(root)

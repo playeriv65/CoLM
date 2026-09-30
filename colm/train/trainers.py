@@ -32,6 +32,7 @@ from colm.selection.pool import (
 from colm.selection.select import CoresetSelector
 from colm.selection.zo import zo_parameters
 from colm.train.memory import MemoryMeter
+from colm.train.precision import TrainingPrecision
 from colm.train.preflight import check_resumable, newest_complete_checkpoint
 from colm.train.selection_state import (
     SelectionStateCallback,
@@ -84,6 +85,8 @@ class _Trainer(Trainer):
         # The attention of the training forward is the one the model was loaded with; the
         # selection forward (fp32, no gradient) switches to `selection_attn_implementation`.
         self.train_attn = self.model.config._attn_implementation
+        # fp32 q/k projections and attention in the last blocks of the training forward only.
+        self.precision = TrainingPrecision(self.model, self.args.train_fp32_tail)
         self._last_log = None  # (time, global_step) of the previous loss log
         self._timer = StepTimer(self.args.profile_timing)
         if self._timer.enabled:
@@ -102,6 +105,7 @@ class _Trainer(Trainer):
                 "max_steps": self.args.max_steps,
                 "fp16": self.args.fp16,
                 "bf16": self.args.bf16,
+                "train_fp32_tail": self.args.train_fp32_tail,
             }
             self.add_callback(
                 StepTimingCallback(self._timer, out_file, self.args.profile_census_steps, meta=meta)
@@ -109,11 +113,15 @@ class _Trainer(Trainer):
             logger.info(f"Step timing ({self.args.profile_timing}) -> {out_file}")
 
     def describe(self) -> dict:
-        return {"attn_implementation": self.train_attn}
+        return {
+            "attn_implementation": self.train_attn,
+            "train_fp32_tail": self.args.train_fp32_tail,
+        }
 
     def train(self, resume_from_checkpoint=None, *args, **kwargs):
-        """`Trainer.train`; a resume is checked first (a complete checkpoint, the newest complete
-        one for `True`) and the trainer restores what it keeps outside the checkpoint's model."""
+        """`Trainer.train` with the fp32 tail installed; a resume is checked first (a complete
+        checkpoint, the newest complete one for `True`) and the trainer restores what it keeps
+        outside the checkpoint's model."""
         checkpoint = resume_from_checkpoint
         if checkpoint is True:  # the stock Trainer would take the newest directory, complete or not
             checkpoint = newest_complete_checkpoint(self.args.output_dir)
@@ -122,7 +130,8 @@ class _Trainer(Trainer):
         if checkpoint:
             check_resumable(checkpoint)
             self.restore(checkpoint)
-        return super().train(checkpoint or resume_from_checkpoint, *args, **kwargs)
+        with self.precision.installed(self.train_attn):
+            return super().train(checkpoint or resume_from_checkpoint, *args, **kwargs)
 
     def restore(self, checkpoint: str) -> None:
         """Load the trainer's own state from `checkpoint` before the first resumed step."""
@@ -157,7 +166,8 @@ class _Trainer(Trainer):
 
     def training_step(self, model, inputs, num_items_in_batch=None):
         self.memory.start()
-        loss = super().training_step(model, inputs, num_items_in_batch)
+        with self.precision.running():
+            loss = super().training_step(model, inputs, num_items_in_batch)
         self.memory.stop("train")
         return loss
 
@@ -272,6 +282,7 @@ class CoresetTrainer(_Trainer):
                 else self.batching.train_tokens,
             },
             "attn_implementation": self.train_attn,
+            "train_fp32_tail": args.train_fp32_tail,
             "selection_attn_implementation": args.selection_attn_implementation,
             "selection_prefix_dtype": getattr(self.extractor, "prefix_dtype", "not_applicable"),
             "selection_prefix_fp32_tail": getattr(self.extractor, "fp32_tail", "not_applicable"),
@@ -315,17 +326,18 @@ class CoresetTrainer(_Trainer):
         """Forward + backward of every pack of the step; the step loss (summed over the packs)."""
         done = torch.zeros((), device=self.args.device)
         try:
-            for i, (batch, weight) in enumerate(sub_batches):
-                with self._timer.fine("prepare"):
-                    batch = self._prepare_inputs(batch)
-                # One gradient all-reduce per optimizer step: on the last sub-batch only.
-                last = i == len(sub_batches) - 1
-                with contextlib.nullcontext() if last else self.accelerator.no_sync(model):
-                    with self._timer.section("forward"), self.compute_loss_context_manager():
-                        loss = self.batching.loss(self, model, batch, weight, total)
-                    with self._timer.section("backward"):
-                        self.accelerator.backward(loss)
-                done += loss.detach()
+            with self.precision.running():
+                for i, (batch, weight) in enumerate(sub_batches):
+                    with self._timer.fine("prepare"):
+                        batch = self._prepare_inputs(batch)
+                    # One gradient all-reduce per optimizer step: on the last sub-batch only.
+                    last = i == len(sub_batches) - 1
+                    with contextlib.nullcontext() if last else self.accelerator.no_sync(model):
+                        with self._timer.section("forward"), self.compute_loss_context_manager():
+                            loss = self.batching.loss(self, model, batch, weight, total)
+                        with self._timer.section("backward"):
+                            self.accelerator.backward(loss)
+                    done += loss.detach()
         except torch.OutOfMemoryError as error:
             raise torch.OutOfMemoryError(f"{error}\n{self.batching.memory_hint()}") from error
         return done

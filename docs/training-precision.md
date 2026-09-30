@@ -1,6 +1,8 @@
 # Training attention precision (Phi-2)
 
-2026-09-29, code at `4fffb2c` (no library change). Question: the LoRA gradients of the training
+2026-09-29. **Decision: `train_fp32_tail` (Phi-2 profile: 3), implemented in the library** (see
+"Library option" at the end); the measurements below were taken with the script-local prototype at
+`4fffb2c`. Question: the LoRA gradients of the training
 forward (fp16 autocast, `flash_attention_2` hub kernel on packed rows) are far from the exact fp32
 gradient (`docs/errors.md`, "fp16 attention"). The selection forward owes its error to the attention
 of blocks 29 and 30 (`docs/selection-precision.md`, "Why the last two blocks"). Is it the same
@@ -97,6 +99,20 @@ not established; the last-100 train loss is identical (0.5793 / 0.5792). Not ext
 the two runs (2.07 / 1.58 s) are not comparable: the card was shared with other jobs, use the
 isolated timings above.
 
+Second seed (seed 1, same recipe, `--train-attention V0` / `V5q`, 300 steps; raw data
+`$COLM_ARTIFACT_ROOT/artifacts/CoLM/train-precision-seed1-20260929/`):
+
+| step | V0 held-out | V5q held-out | diff | V0 GSM8K | V5q GSM8K | diff |
+|---|---|---|---|---|---|---|
+| 100 | 0.5713 | 0.5622 | -0.0091 | 0.7890 | 0.7759 | -0.0131 |
+| 200 | 0.5551 | 0.5466 | -0.0085 | 0.7685 | 0.7559 | -0.0126 |
+| 300 | 0.5493 | 0.5410 | -0.0083 | 0.7613 | 0.7502 | -0.0111 |
+
+All twelve differences (two seeds x three steps x two sets) favour V5q; they are 2-4x the F
+seed-to-seed spread. Two seeds are still not a significance test, but the direction, the size and
+the mechanism (a gradient that is 0.04 instead of 1.0 from the exact one) agree, which is why the
+option became a profile default.
+
 ## Verdict
 
 - The error sits in the last three blocks (29, 30 and 31) and in the q/k path: fp32 attention alone
@@ -105,23 +121,93 @@ isolated timings above.
 - The 1.0 error of the LoRA groups of blocks 0-25 is the corrupted backward signal of the last
   blocks (0.02-0.03 with V5q); MLPs are harmless (V4 = V1q); block 28 adds nothing.
 - V5q costs +12.6 % of a pack's forward + backward, about +53 ms (+5.8 %) per step, +0.7 GiB.
-- Learning (one seed, 300 steps): V5q lower by 0.005-0.008 held-out and 0.004-0.012 GSM8K, 2-3x the
-  F spread, consistently: indicated, not established; confirm with a second seed before a default.
+- Learning (two seeds, 300 steps): V5q lower by 0.005-0.009 held-out and 0.004-0.013 GSM8K at every
+  step, 2-4x the F spread, in all 12 comparisons: indicated, decided as the Phi-2 default.
 - V0 error here is 1.0 (cosine 0.65) against 0.40-0.53 in `errors.md` (other packs, the trained
   adapter of `layer-signal-20260928`); without the fp16 loss scale the gradient is garbage (69).
 
-## Proposal (not merged)
+## Library option `train_fp32_tail` (implemented)
 
-- Option `train_fp32_tail: int = 0` (`TrainingArguments`, profile key `train_fp32_tail`; phi
-  profile 3 after a second seed of the learning check): the last k blocks of the TRAINING forward run
-  q_proj / k_proj (with LoRA) and the attention in fp32.
-- Where: a new `colm/train/precision.py`. It wraps the attention function of the model
-  (`AttentionInterface`, the key of `config._attn_implementation`) with a dispatcher on
-  `module.layer_idx` (blocks >= 32 - k: q, k, v to fp32, `sdpa` MATH with the block mask built from
-  `cu_seq_lens_q`; the others: the hub kernel unchanged) and wraps `forward` of the q_proj / k_proj
-  of those blocks in `torch.autocast(enabled=False)`. `scripts/diagnostics/measure_training_attention.py`
-  (`install_dispatch`, `install_precision_hooks`, `block_mask`) is the prototype (about 60 lines);
-  the selection forward (sdpa, own fp32 tail) is untouched.
-- Cost with k = 3 (V5q): +12.6 % of a pack's forward + backward, +53 ms of a 0.9 s step (5.8 %), +0.7
-  GiB peak. Cheaper variants exist only with less accuracy (V1q: +3.6 % of the step, error 0.29).
-  A varlen fp32 attention (no dense mask, no MATH) would cut the 4.2 ms per block; not explored.
+- Option `train_fp32_tail: int = 0` (`TrainingArguments`, profile key `train_fp32_tail`): the last k
+  blocks of the TRAINING forward run q_proj / k_proj (with their LoRA) and the attention in fp32.
+  Profiles: phi 3, llama / default 0. A profile value applies only under mixed precision over fp32
+  weights (`--precision fp32`, or bf16 weights, get 0); an explicit CLI / JSON value wins, and
+  asking for it without mixed precision, with k outside [0, number of layers] or with
+  q/k weights below fp32 fails at load. It is in `resolved_config.json` (`training` and `derived`),
+  the step-timing metadata, and `colm-sweep create --dry-run` prints the resolved value per arm.
+- Where: `colm/train/precision.py`, `TrainingPrecision(model, k)`.
+  - `installed(key)` (a context manager around `Trainer.train`, key = the training attention
+    implementation, e.g. `kernels-community/flash-attn2`) registers a dispatcher for that key in
+    transformers' public `AttentionInterface` and wraps the `forward` of the q_proj / k_proj of the
+    tail. `set_attn_implementation` is untouched: the selection's `sdpa` is another key, and the
+    trainer's switching between the two works as before. The dispatcher sends a call to fp32 only for
+    a tail block (`module.layer_idx`) and only when `cu_seq_lens_q` is present (packed rows): q, k, v
+    to fp32, `sdpa` on the MATH backend with the block-diagonal causal mask built from
+    `cu_seq_lens_q`; everything else goes to the wrapped function unchanged. Both are removed when
+    `train()` returns, also on an error.
+  - `running()` turns them on around the forward + backward of a training step
+    (`CoresetTrainer._train_packs`, `_Trainer.training_step` for the baseline); outside it (selection,
+    in-training and standalone evaluation, padded batches) nothing differs from k = 0.
+  - Frozen weights: `frozen_base_low_precision` stores the frozen Linears of the fp16 layers in fp16;
+    `store_frozen_linears(..., keep_qk_last=k)` keeps the q_proj / k_proj base weights and biases of the
+    last k layers fp32 (the other Linears of those layers follow the existing `keep_last` rule: for the
+    Phi-2 defaults the selection already keeps the last 3 layers fully fp32, so nothing extra is held;
+    with k above that only q/k are added, 26 MB per layer more than in fp16). `check_tail` verifies the dtypes at load
+    (a bf16-weight model or a stored q/k weight is an error, not a silent fp16 round trip).
+- Cost with k = 3: +12 % of a pack's forward + backward, about +6 % of the step, +0.7 GiB.
+
+Verification (GPU 2, RTX PRO 6000, library path; `measure_training_attention.py` variant `LIB3`,
+the same 6 packs and protocol as above; raw data `$COLM_ARTIFACT_ROOT/artifacts/CoLM/train-fp32-tail-20260929/`):
+
+| variant | pack rel. L2 (cosine) | step rel. L2 (cosine) | ms / pack | peak GiB |
+|---|---|---|---|---|
+| V0 (`train_fp32_tail=0`) | 1.011 (0.651) | 1.044 (0.633) | 141.0 | 26.5 |
+| V5q (script prototype) | 0.0404 (0.999) | 0.0378 (0.999) | 157.3 | 27.2 |
+| LIB3 (`train_fp32_tail=3`) | 0.0404 (0.999) | 0.0378 (0.999) | 157.6 | 27.2 |
+
+The library path reproduces the prototype's gradient to the printed digits (and its timing to 0.2 %).
+
+`colm.train.train` end to end (the rank-sweep r=128 / alpha=512 recipe through
+`train_precision_arm.py --arm P2`, which passes no `train_fp32_tail`, so the Phi-2 profile's 3 applies;
+GPU 2 alone, host load average 12-17):
+
+- 30 steps, in-training evaluation at steps 15 and 30 (padded batches, no `cu_seq_lens_q`: the
+  dispatcher was not involved and the run did not crash as the prototype did): trains; held-out /
+  GSM8K loss 0.6811 / 0.9621 at step 15 and 0.6535 / 0.9023 at step 30; median step 0.834 s
+  (selection 0.37 s), peak allocated 23.5 GB, peak reserved 30.8 GB. The log has "q/k projections of
+  the last 3 layers fp32" (weights) and the dispatcher line; `resolved_config.json` records
+  `train_fp32_tail: 3` (`training` and `derived`).
+- Step time A/B, 100 steps of the same recipe and seed, `--train-fp32-tail 0` against the default 3
+  (mean of steps 11-99, evaluation steps excluded): 0.804 s against 0.848 s, **+44 ms (+5.5 %)** per
+  step; the training part of the step (step minus selection) 0.429 s against 0.472 s (+10 %);
+  selection 0.375 s in both. Peak allocated memory over the same steps 21.5 GB against 23.1 GB
+  (the peak follows the longest pack of the step; the pack timing above gives +0.7 GiB on one pack).
+  One run per arm, single-step noise is in the means.
+- 300 steps, seed 0, evaluation at 100 / 200 / 300 against the prototype's V5q run above (the
+  first table; both runs are seed 0 with the same selection seed, but fp16 nondeterminism makes them
+  different trajectories) and against V0:
+
+| step | set | library (tail 3) | prototype V5q | library - V5q | V0 | library - V0 |
+|---|---|---|---|---|---|---|
+| 100 | held-out | 0.5602 | 0.5621 | -0.0019 | 0.5696 | -0.0094 |
+| 200 | held-out | 0.5452 | 0.5461 | -0.0009 | 0.5515 | -0.0063 |
+| 300 | held-out | 0.5406 | 0.5418 | -0.0012 | 0.5473 | -0.0067 |
+| 100 | GSM8K | 0.7758 | 0.7760 | -0.0002 | 0.7802 | -0.0044 |
+| 200 | GSM8K | 0.7559 | 0.7544 | +0.0015 | 0.7660 | -0.0101 |
+| 300 | GSM8K | 0.7486 | 0.7483 | +0.0003 | 0.7574 | -0.0088 |
+
+  The library run agrees with the prototype to at most 0.0019 (held-out) and 0.0015 (GSM8K), below
+  the seed-to-seed spread (0.002-0.005), and sits below V0 by 0.006-0.009 held-out and 0.004-0.010
+  GSM8K at every step, the same effect as in the two-seed comparison. Mean step 0.844 s over the
+  run (evaluation steps excluded), training peak 23.05 GB, reserved 33.3 GB. Raw logs, `eval_loss.jsonl`
+  and `trainer_state.json` of the three runs: `$COLM_ARTIFACT_ROOT/artifacts/CoLM/train-fp32-tail-20260929/`
+  (checkpoints deleted).
+
+CPU tests (`tests/test_train_precision.py`, bf16 autocast standing in for fp16): with no autocast and the
+tail on every layer the dispatcher reproduces the stock fp32 logits (1e-5) and LoRA gradient (1e-4); with
+autocast the tail-wrapped q/k projections return fp32 that equals the unwrapped module bit for bit and
+only for the tail blocks; `train_fp32_tail=0` registers nothing; the dispatcher falls back without
+`cu_seq_lens_q`; outside `running()` (evaluation, selection) the logits equal the stock path bit for
+bit; the registry entry and the `forward` overrides are restored after `installed()`, also after an
+error; the coreset selection forward makes no fp32 attention call while every training forward does;
+option validation and profile defaults; frozen-weight dtypes.
