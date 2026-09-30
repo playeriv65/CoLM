@@ -65,6 +65,48 @@ def test_pack_layout(tokenizer):
     assert torch.bincount(segment).tolist() == [e.num_labels for e in examples]
 
 
+def _torch_geometry(examples):
+    """The label geometry of a pack with torch operations (how `pack` computed it before it
+    was moved to numpy to avoid the intra-op thread pool)."""
+    lengths = torch.tensor([len(e) for e in examples])
+    cu = torch.zeros(len(examples) + 1, dtype=torch.int32)
+    cu[1:] = lengths.cumsum(0)
+    labels = torch.from_numpy(np.concatenate([e.labels for e in examples]))
+    labels[cu[:-1].long()] = -100
+    starts = cu[:-1].long()
+    position_ids = torch.arange(int(cu[-1])) - torch.repeat_interleave(starts, lengths)
+    targets = torch.cat([labels[1:], labels.new_full((1,), -100)])
+    positions = (targets != -100).nonzero(as_tuple=True)[0]
+    segment = torch.bucketize(positions, cu[1:].long(), right=True)
+    return {
+        "position_ids": position_ids[None],
+        "cu_seq_lens_q": cu,
+        "labels": labels[None],
+        "label_positions": positions,
+        "label_targets": targets[positions],
+        "label_segment": segment,
+        "label_counts": torch.bincount(segment, minlength=len(examples)),
+    }
+
+
+def test_pack_equals_the_torch_computation_including_examples_without_labels():
+    rng = np.random.default_rng(0)
+    for trial in range(50):
+        examples = []
+        for _ in range(int(rng.integers(1, 8))):
+            n = int(rng.integers(2, 40))
+            ids = rng.integers(0, 100, n)
+            cut = int(rng.choice([0, 1, n // 2, n]))  # n: nothing to predict in this example
+            labels = ids.copy()
+            labels[:cut] = -100
+            examples.append(Example(ids, labels, int(rng.integers(0, 4)), trial))
+        batch, expected = pack(examples), _torch_geometry(examples)
+        meta = batch["colm_meta"]
+        got = {**batch, **meta}
+        for key, value in expected.items():
+            assert got[key].dtype == value.dtype and torch.equal(got[key], value), key
+
+
 def test_greedy_groups():
     assert greedy_groups([3, 3, 3, 10, 1], 6) == [[0, 1], [2], [3], [4]]
     assert greedy_groups([5], 1) == [[0]]

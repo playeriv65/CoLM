@@ -38,36 +38,42 @@ class Example:
 
 
 def pack(examples: list[Example]) -> dict:
-    """One row holding `examples`: the batch dict the models and losses take (CPU tensors)."""
-    lengths = torch.tensor([len(e) for e in examples])
-    cu = torch.zeros(len(examples) + 1, dtype=torch.int32)
-    cu[1:] = lengths.cumsum(0)
-    labels = torch.from_numpy(np.concatenate([e.labels for e in examples]))
-    labels[cu[:-1].long()] = IGNORE_INDEX
+    """One row holding `examples`: the batch dict the models and losses take (CPU tensors).
+
+    Built with numpy only: the many tiny tensor operations of a torch version ran on the
+    intra-op thread pool, whose barriers stretch to tens of milliseconds on a loaded host
+    (p99.9 of 23 ms against 1.1 ms, `docs/system-audit.md`).
+    """
+    lengths = np.array([len(e) for e in examples], dtype=np.int64)
+    cu = np.zeros(len(examples) + 1, dtype=np.int32)
+    np.cumsum(lengths, out=cu[1:])
+    labels = np.concatenate([e.labels for e in examples])
+    starts = cu[:-1].astype(np.int64)
+    labels[starts] = IGNORE_INDEX
     total = int(cu[-1])
-    starts = cu[:-1].long()
-    position_ids = torch.arange(total) - torch.repeat_interleave(starts, lengths)
+    position_ids = np.arange(total) - np.repeat(starts, lengths)
     # Where the row predicts a label: computed here on the CPU, so that the losses need no
     # device-to-host synchronisation (`nonzero`, `bincount`) to find them.
-    targets = torch.cat([labels[1:], labels.new_full((1,), IGNORE_INDEX)])
-    positions = (targets != IGNORE_INDEX).nonzero(as_tuple=True)[0]
-    segment = torch.bucketize(positions, cu[1:].long(), right=True)
+    targets = np.append(labels[1:], IGNORE_INDEX)
+    positions = np.flatnonzero(targets != IGNORE_INDEX)
+    segment = np.searchsorted(cu[1:], positions, side="right")  # torch.bucketize(right=True)
+    tensor = torch.from_numpy
     return {
-        "input_ids": torch.from_numpy(np.concatenate([e.input_ids for e in examples]))[None],
-        "position_ids": position_ids[None],
-        "labels": labels[None],
-        "cu_seq_lens_q": cu,
-        "cu_seq_lens_k": cu,
+        "input_ids": tensor(np.concatenate([e.input_ids for e in examples]))[None],
+        "position_ids": tensor(position_ids)[None],
+        "labels": tensor(labels)[None],
+        "cu_seq_lens_q": tensor(cu),
+        "cu_seq_lens_k": tensor(cu),
         "max_length_q": int(lengths.max()),
         "max_length_k": int(lengths.max()),
         META: {
             "sources": torch.tensor([e.source for e in examples]),
             "indices": torch.tensor([e.index for e in examples]),
             "completion_lengths": torch.tensor([e.completion_length for e in examples]),
-            "label_positions": positions,
-            "label_targets": targets[positions],
-            "label_segment": segment,
-            "label_counts": torch.bincount(segment, minlength=len(examples)),
+            "label_positions": tensor(positions),
+            "label_targets": tensor(targets[positions]),
+            "label_segment": tensor(segment),
+            "label_counts": tensor(np.bincount(segment, minlength=len(examples))),
         },
     }
 
