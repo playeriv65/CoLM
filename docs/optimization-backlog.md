@@ -8,6 +8,10 @@
 > (`docs/errors.md`), so their token counts and step times do not apply to it. F4 is corrected
 > (26.9%, not 36.9%).
 
+The system audit of 2026-09-29 (`docs/system-audit.md`) added, on top of the items below: `pack` in numpy
+(host tail latency), frozen fp32 Linear weights stored in fp16 (the per-forward autocast cast), token-balanced
+training shares and a sharded evaluation loss for several ranks, and lists the remaining candidates.
+
 Goal: make a CoLM training step faster **without changing the mini-batch selection semantics**.
 
 The profiles and timing tables through the stock-attention section below describe

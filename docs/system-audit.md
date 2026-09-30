@@ -16,7 +16,7 @@ the evidence that they do not.
 | (b) per-step fixed costs | host part is < 2 % of the step; one tail-latency source found; the remaining cost is GPU work, of which ~8 % is a repeated weight cast | `pack` in numpy, frozen fp32 Linear weights stored in fp16 |
 | (c) checkpoints / eval duplicates | 1.9 % of a job, below the bar; nothing changed | - |
 | (d) robustness | resume from an incomplete or model-only checkpoint, disk-full at the first save, launcher SIGTERM, missing loss rows | preflight module, launcher signal forwarding, validation, OOM hint |
-| (e) structure / tests | no dead options; `train.main` is the only long function of the core; tests for the collective paths were missing | test for eval callback and sharding on 2/3 ranks, token balance, pack geometry, resume |
+| (e) structure / tests | no dead options; `train.main` split; tests for the collective paths were missing | test for eval callback and sharding on 2/3 ranks, token balance, pack geometry, resume |
 
 ## (a) Multi-GPU
 
@@ -234,9 +234,10 @@ the choice a question of how often a run dies, which the history does not say.
 * Aliases: `per_device_train_batch_size` is rewritten in `__post_init__` to the pool size
   (`micro_batch_size` keeps the configured value; `resolved_config.json` shows 32 for the default). It is
   documented in the help, but it is the one naming trap left; renaming the key would break every config.
-* Long functions: `train.main` (112 lines) is a linear script; the rest of the core is < 90 lines
-  (`CoresetSelector.__call__` 70, `_select` 55). Not split: no duplicated logic between the trainers
-  (`SubsetTrainer` / `SubsetTrainerEfficient` differ in three small methods).
+* Long functions: `train.main` was 112 lines; the logging set-up, the model checks and the run's
+  epilogue are now `configure_logging`, `prepare_model` and `finish` (`main` ~50 lines). The rest of
+  the core is < 90 lines (`CoresetSelector.__call__` 70, `_select` 55). No duplicated logic between the
+  trainers (`SubsetTrainer` / `SubsetTrainerEfficient` differ in three small methods).
 * Test gaps closed: the eval callback under 2 ranks (rank 0 records, all ranks take part), the sharded
   loss on 2 and 3 ranks (`==`), the token balance of the shares, `pack` against its torch reference,
   resume of an incomplete directory, model-only warning, launcher signal, disk, validation, the stored
