@@ -1,6 +1,8 @@
 """Entry points: `colm-train`, `colm-eval`, `colm-sweep` (see the README quickstart)."""
 
+import contextlib
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -20,6 +22,24 @@ process the options are used as they are.
 
 The options are those of the run (defaults included):
 """
+
+
+@contextlib.contextmanager
+def forwarding_termination(process):
+    """Pass SIGTERM / SIGHUP received by the launcher on to `process` (torchrun) while it runs.
+
+    Without it `kill <launcher>` ends only the launcher: torchrun and its workers keep the GPUs
+    (and write into a closed pipe) until they fail on it. torchrun stops its workers on SIGTERM.
+    """
+    signals = (signal.SIGTERM, signal.SIGHUP)
+    previous = [
+        signal.signal(s, lambda number, frame: process.send_signal(signal.SIGTERM)) for s in signals
+    ]
+    try:
+        yield
+    finally:
+        for number, handler in zip(signals, previous, strict=True):
+            signal.signal(number, handler)
 
 
 def train(argv: list[str] | None = None) -> int:
@@ -66,6 +86,7 @@ def train(argv: list[str] | None = None) -> int:
             command, env=env, cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
         ) as process,
         open(log, "w") as file,
+        forwarding_termination(process),
     ):
         for line in process.stdout:
             sys.stdout.write(line)
